@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=JsonLens
+Comment=Fast and lightweight JSON viewer and editor
+Exec=json-lens
+Icon=application-json
+Terminal=false
+Type=Application
+Categories=Development;Utility;TextEditor;
+StartupNotify=true

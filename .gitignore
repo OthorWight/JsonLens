@@ -1,0 +1,5 @@
+# Build directory
+builddir/
+
+# Meson / Ninja generated files
+compile_commands.json
