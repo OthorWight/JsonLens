@@ -134,7 +134,7 @@ void JsonInsertAtIndex(Arena* a, JsonValue* parent, size_t index, const JsonNode
 }
 
 // Minimal cross-platform file dialog using native system calls
-std::string ShowOpenFileDialog() {
+std::string ShowOpenFileDialog(const std::string& default_dir = "") {
 #ifdef _WIN32
     char filename[MAX_PATH] = {0};
     OPENFILENAMEA ofn;
@@ -146,14 +146,21 @@ std::string ShowOpenFileDialog() {
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
     ofn.lpstrDefExt = "json";
+    if (!default_dir.empty()) ofn.lpstrInitialDir = default_dir.c_str();
     if (GetOpenFileNameA(&ofn)) return std::string(filename);
 #else
     char buffer[1024];
     std::string result = "";
 #ifdef __APPLE__
-    FILE* pipe = popen("osascript -e 'POSIX path of (choose file)' 2>/dev/null", "r");
+    std::string cmd = "osascript -e 'POSIX path of (choose file";
+    if (!default_dir.empty()) cmd += " default location \"" + default_dir + "\"";
+    cmd += ")' 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
 #else
-    FILE* pipe = popen("zenity --file-selection --title=\"Open JSON\" --file-filter=\"*.json\" 2>/dev/null", "r");
+    std::string cmd = "zenity --file-selection --title=\"Open JSON\" --file-filter=\"*.json\"";
+    if (!default_dir.empty()) cmd += " --filename=\"" + default_dir + "/\"";
+    cmd += " 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
 #endif
     if (!pipe) return "";
     if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
@@ -202,6 +209,7 @@ std::string ShowSaveFileDialog() {
 struct AppSettings {
     float zoom = 1.0f;
     std::vector<std::string> recent_files;
+    std::string last_folder;
 
     std::string GetSettingsPath() {
         char* pref_path = SDL_GetPrefPath("JsonLens", "JsonLens");
@@ -237,6 +245,8 @@ struct AppSettings {
                     }
                 }
             }
+            const char* folder = json_get_string(root, "last_folder", nullptr);
+            if (folder) last_folder = folder;
         }
         arena_free(&arena);
         arena_free(&scratch);
@@ -255,6 +265,9 @@ struct AppSettings {
             json_append_string(&arena, recents, file.c_str());
         }
         json_add(&arena, root, "recent_files", recents);
+        
+        if (!last_folder.empty()) 
+            json_add_string(&arena, root, "last_folder", last_folder.c_str());
 
         char* str = json_to_string(&arena, root, true);
         if (str) {
@@ -286,6 +299,9 @@ struct LargeTextFile {
     size_t data_capacity = 0;
     std::vector<size_t> line_offsets;
     
+    size_t select_start = (size_t)-1;
+    size_t select_end = (size_t)-1;
+
     std::vector<UndoRecord> undo_stack;
     std::vector<UndoRecord> redo_stack;
 
@@ -318,6 +334,7 @@ struct LargeTextFile {
     ~LargeTextFile() {
         ClearHistory();
         ClearGraph();
+        select_start = select_end = (size_t)-1;
         if (data) free(data);
         arena_free(&main_arena);
         arena_free(&scratch_arena);
@@ -370,8 +387,14 @@ struct LargeTextFile {
 
     size_t GetHistoryMemoryUsage() const {
         size_t total = 0;
-        for (const auto& r : undo_stack) total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
-        for (const auto& r : redo_stack) total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
+        for (const auto& r : undo_stack) {
+            total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
+            for (const auto& d : r.text_deltas) total += d.old_str.capacity() + d.new_str.capacity();
+        }
+        for (const auto& r : redo_stack) {
+            total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
+            for (const auto& d : r.text_deltas) total += d.old_str.capacity() + d.new_str.capacity();
+        }
         return total;
     }
 
@@ -1086,6 +1109,12 @@ int main(int /*argc*/, char** /*argv*/) {
             snprintf(title, sizeof(title), "JsonLens - %s", filepath_buffer);
             SDL_SetWindowTitle(window, title);
             settings.AddRecentFile(path);
+            
+            size_t pos = path.find_last_of("/\\");
+            if (pos != std::string::npos) {
+                settings.last_folder = path.substr(0, pos);
+                settings.Save();
+            }
 
             doc_loading = true;
             if (doc_thread.joinable()) doc_thread.join();
@@ -1119,14 +1148,28 @@ int main(int /*argc*/, char** /*argv*/) {
 
     auto FormatFile = [&](bool pretty) {
         if (!doc_loading && !doc_saving && !doc_formatting && doc->data && doc->root_json) {
-            doc->ClearTextHistory();
             doc_formatting = true;
             if (doc_thread.joinable()) doc_thread.join();
             
             doc_thread = std::thread([doc, pretty, &doc_formatting, &search_dirty]() {
+                std::string old_text(doc->data, doc->size);
                 doc->is_pretty = pretty;
                 doc->tree_dirty = true;
                 doc->RebuildTextFromTree();
+                
+                if (doc->data) {
+                    std::string new_text(doc->data, doc->size);
+                    if (old_text != new_text) {
+                        UndoRecord rec{};
+                        rec.action = UndoActionType::TextReplace;
+                        rec.text_deltas.push_back({0, std::move(old_text), std::move(new_text)});
+                        doc->undo_stack.push_back(std::move(rec));
+                        doc->redo_stack.clear();
+                        while (doc->GetHistoryMemoryUsage() > 1024ULL * 1024ULL * 500ULL && doc->undo_stack.size() > 1) {
+                            doc->undo_stack.erase(doc->undo_stack.begin());
+                        }
+                    }
+                }
                 doc_formatting = false;
                 search_dirty = true;
             });
@@ -1164,7 +1207,7 @@ int main(int /*argc*/, char** /*argv*/) {
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Open...", "Ctrl+O")) {
-                    LoadFile(ShowOpenFileDialog());
+                    LoadFile(ShowOpenFileDialog(settings.last_folder));
                 }
                 if (ImGui::BeginMenu("Recent Files")) {
                     if (settings.recent_files.empty()) {
@@ -1269,7 +1312,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
         // Global keyboard shortcuts
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
-            LoadFile(ShowOpenFileDialog());
+            LoadFile(ShowOpenFileDialog(settings.last_folder));
         }
         
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
@@ -1544,7 +1587,7 @@ int main(int /*argc*/, char** /*argv*/) {
             }
 
             ImGuiTabItemFlags text_tab_flags = force_text_tab ? ImGuiTabItemFlags_SetSelected : 0;
-            if (ImGui::BeginTabItem("Raw Text", nullptr, text_tab_flags)) {
+            if (ImGui::BeginTabItem("Text View", nullptr, text_tab_flags)) {
                 force_text_tab = false;
                 ImGui::BeginChild("TextChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 // If the DOM was edited, trigger the text regeneration in a background thread
@@ -1568,6 +1611,42 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (doc->data) {
                         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Ensure monospace if loaded
                         
+                        ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
+                        float char_width = ImGui::CalcTextSize("A").x;
+                        
+                        auto GetOffsetFromMouse = [&]() -> size_t {
+                            if (doc->line_offsets.empty()) return 0;
+                            float y = ImGui::GetMousePos().y - text_start_pos.y;
+                            int raw_line_idx = (int)(y / ImGui::GetTextLineHeight());
+                            if (raw_line_idx < 0) raw_line_idx = 0;
+                            size_t line_idx = (size_t)raw_line_idx;
+                            if (line_idx >= doc->line_offsets.size()) line_idx = doc->line_offsets.size() - 1;
+                            size_t line_start = doc->line_offsets[line_idx];
+                            size_t line_end = (line_idx + 1 < doc->line_offsets.size()) ? doc->line_offsets[line_idx + 1] : doc->size;
+                            if (line_end > line_start && doc->data[line_end - 1] == '\n') line_end--;
+                            float x = ImGui::GetMousePos().x - text_start_pos.x;
+                            size_t char_idx = x > 0 ? (size_t)(x / char_width + 0.5f) : 0;
+                            return std::min(line_start + char_idx, line_end);
+                        };
+
+                        if (ImGui::IsWindowHovered()) {
+                            if (ImGui::IsMouseClicked(0)) {
+                                doc->select_start = doc->select_end = GetOffsetFromMouse();
+                            }
+                        }
+                        if (ImGui::IsMouseDown(0) && doc->select_start != (size_t)-1 && (ImGui::IsWindowHovered() || ImGui::IsWindowFocused())) {
+                            doc->select_end = GetOffsetFromMouse();
+                        }
+
+                        if (ImGui::IsWindowFocused() && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) {
+                            if (doc->select_start != (size_t)-1 && doc->select_start != doc->select_end) {
+                                size_t s_start = std::min(doc->select_start, doc->select_end);
+                                size_t s_end = std::max(doc->select_start, doc->select_end);
+                                std::string sel(doc->data + s_start, s_end - s_start);
+                                ImGui::SetClipboardText(sel.c_str());
+                            }
+                        }
+
                         if (scroll_to_line >= 0 && scroll_to_line_frames > 0) {
                             float target_y = ImGui::GetCursorPosY() + scroll_to_line * ImGui::GetTextLineHeightWithSpacing();
                             ImGui::SetScrollY(target_y - ImGui::GetWindowHeight() * 0.5f);
@@ -1597,6 +1676,31 @@ int main(int /*argc*/, char** /*argv*/) {
                                         );
                                     } else {
                                         highlight_line = -1;
+                                    }
+                                }
+
+                                // Selection Highlight
+                                size_t s_start = std::min(doc->select_start, doc->select_end);
+                                size_t s_end = std::max(doc->select_start, doc->select_end);
+                                if (s_start != s_end && s_start < end && s_end > start) {
+                                    size_t match_start = std::max(s_start, start);
+                                    size_t match_end = std::min(s_end, end);
+                                    float pre_width = ImGui::CalcTextSize(doc->data + start, doc->data + match_start).x;
+                                    float match_width = ImGui::CalcTextSize(doc->data + match_start, doc->data + match_end).x;
+                                    ImGui::GetWindowDrawList()->AddRectFilled(
+                                        ImVec2(pos.x + pre_width, pos.y), 
+                                        ImVec2(pos.x + pre_width + match_width, pos.y + ImGui::GetTextLineHeight()), 
+                                        IM_COL32(0, 120, 215, 100)
+                                    );
+                                }
+
+                                // Error Highlight
+                                if (!doc->root_json && doc->data != nullptr && doc->last_err.offset > 0 && doc->last_err.offset <= doc->size) {
+                                    size_t err_off = doc->last_err.offset;
+                                    if (err_off >= start && err_off <= end) {
+                                        float err_x = ImGui::CalcTextSize(doc->data + start, doc->data + err_off).x;
+                                        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x + ImGui::GetContentRegionAvail().x, pos.y + ImGui::GetTextLineHeight()), IM_COL32(255, 0, 0, 50));
+                                        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(pos.x + err_x, pos.y), ImVec2(pos.x + err_x + char_width, pos.y + ImGui::GetTextLineHeight()), IM_COL32(255, 0, 0, 200));
                                     }
                                 }
 
