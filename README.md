@@ -1,12 +1,12 @@
 # JsonLens
 
-A fast, lightweight, and resilient JSON viewer and editor built with GTK4 and Vala.
+A fast, lightweight, and resilient JSON viewer and editor built with Dear ImGui, SDL2, and C++.
 
 ## Features
 
 * **Three Interchangeable Views**: 
-  * **Text View**: A full-featured code editor utilizing GtkSourceView with syntax highlighting, bracket matching, code folding, and line numbers.
-  * **Column View**: Navigate deeply nested JSON objects and arrays using cascading lists (Miller columns).
+  * **Text View**: A virtualized text viewer using ImGuiListClipper to instantly render gigabyte-sized files.
+  * **Tree View**: Navigate and seamlessly edit deeply nested JSON objects and arrays.
   * **Graph View**: A node-based visual representation of your JSON tree.
 * **Blazing Fast Parsing**: Powered by a custom C-based Arena allocator that parses JSON in background threads, keeping the UI perfectly smooth even when opening massive files.
 * **Resilient to Errors**: Gracefully handles invalid JSON by highlighting exact syntax errors (Line and Column) directly in the editor.
@@ -17,29 +17,34 @@ A fast, lightweight, and resilient JSON viewer and editor built with GTK4 and Va
 ## Dependencies
 
 To build JsonLens from source, you will need the following development packages:
-* `valac` (Vala Compiler)
+* `gcc` / `g++` or `clang`
 * `meson` and `ninja-build` (Build System)
 * `pkg-config`
-* `gtk4`
-* `gtksourceview-5`
+* `libsdl2-dev`
+* `libgl1-mesa-dev` (Linux)
 
 ### Ubuntu / Debian Linux
 ```bash
 sudo apt update
-sudo apt install valac meson ninja-build pkg-config libgtk-4-dev libgtksourceview-5-dev
+sudo apt install build-essential meson ninja-build pkg-config libsdl2-dev libgl1-mesa-dev
 ```
 
 ### macOS (Homebrew)
 ```bash
-brew install vala meson ninja pkg-config gtk4 gtksourceview5
+brew install gcc meson ninja pkg-config sdl2
 ```
 
 ### Windows (MSYS2 UCRT64)
 ```bash
-pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-meson mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-vala mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-gtk4 mingw-w64-ucrt-x86_64-gtksourceview5
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-meson mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-sdl2
 ```
 
 ## Building
+
+Before building for the first time, you must fetch the Dear ImGui dependency:
+```bash
+./setup_imgui.sh
+```
 
 JsonLens uses the Meson build system. To compile the project, run:
 

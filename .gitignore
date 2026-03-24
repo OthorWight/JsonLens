@@ -3,3 +3,17 @@ builddir/
 
 # Meson / Ninja generated files
 compile_commands.json
+
+# Third-party dependencies (fetched by setup_imgui.sh)
+third_party/
+
+# Application settings and layout files
+imgui.ini
+settings.json
+
+# OS generated files
+.DS_Store
+
+# IDE / Editor files
+.vscode/
+.idea/
