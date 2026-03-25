@@ -1341,16 +1341,18 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (doc->Undo()) {
                         doc->ClearAstHistory();
                         doc_formatting = true;
+                        bool allow_comments = settings.allow_comments;
                         if (doc_thread.joinable()) doc_thread.join();
-                        doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
                     }
                 }
                 if (ImGui::MenuItem("Redo", "Ctrl+Y", false, has_doc && !doc->redo_stack.empty())) {
                     if (doc->Redo()) {
                         doc->ClearAstHistory();
                         doc_formatting = true;
+                        bool allow_comments = settings.allow_comments;
                         if (doc_thread.joinable()) doc_thread.join();
-                        doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
                     }
                 }
                 ImGui::Separator();
