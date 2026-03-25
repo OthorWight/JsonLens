@@ -54,7 +54,7 @@ jobs:
             mingw-w64-ucrt-x86_64-meson
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-sdl2
+            mingw-w64-ucrt-x86_64-SDL2
             
       - name: Fetch ImGui
         run: bash ./setup_imgui.sh
