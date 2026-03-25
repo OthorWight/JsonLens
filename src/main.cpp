@@ -81,6 +81,7 @@ struct GraphNode {
     float x = 0, y = 0;
     float drawn_width = 0;
     size_t offset = 0;
+    GraphNode* parent = nullptr;
     GraphNodeType type = GraphNodeType::Normal;
     JsonValue* source_val = nullptr;
     size_t page_step = 2000;
@@ -210,6 +211,7 @@ struct AppSettings {
     float zoom = 1.0f;
     std::vector<std::string> recent_files;
     std::string last_folder;
+    int graph_goto_target = 0; // 0 = Text View, 1 = Tree View
 
     std::string GetSettingsPath() {
         char* pref_path = SDL_GetPrefPath("JsonLens", "JsonLens");
@@ -247,6 +249,7 @@ struct AppSettings {
             }
             const char* folder = json_get_string(root, "last_folder", nullptr);
             if (folder) last_folder = folder;
+            graph_goto_target = (int)json_get_number(root, "graph_goto_target", 0.0);
         }
         arena_free(&arena);
         arena_free(&scratch);
@@ -268,6 +271,7 @@ struct AppSettings {
         
         if (!last_folder.empty()) 
             json_add_string(&arena, root, "last_folder", last_folder.c_str());
+        json_add_number(&arena, root, "graph_goto_target", (double)graph_goto_target);
 
         char* str = json_to_string(&arena, root, true);
         if (str) {
@@ -745,6 +749,7 @@ static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::
             prev_node->label = "[< Previous Page]";
             prev_node->type = GraphNodeType::PrevPage;
             prev_node->source_val = val;
+            prev_node->parent = node;
             node->children.push_back(prev_node);
         }
 
@@ -753,7 +758,7 @@ static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::
             if (node_count > 100000) break; // Global cap reached
             std::string child_key = (val->type == JSON_OBJECT) ? (val->as.list.items[i].key ? val->as.list.items[i].key : "") : ("[" + std::to_string(i) + "]");
             GraphNode* child = BuildGraphNode(doc, &val->as.list.items[i].value, child_key, depth + 1, node_count);
-            if (child) { node->children.push_back(child); actual_count++; }
+            if (child) { child->parent = node; node->children.push_back(child); actual_count++; }
         }
         
         if (start_idx + actual_count < val->as.list.count) {
@@ -763,6 +768,7 @@ static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::
             more->type = GraphNodeType::NextPage;
             more->source_val = val;
             more->page_step = step;
+            more->parent = node;
             node->children.push_back(more);
         }
     }
@@ -833,7 +839,7 @@ static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec
 }
 
 // Recursive UI for editing JSON trees
-int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path) {
+int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time) {
     // Action Flags: 1 = Modified, 2 = Remove Requested
     int action = 0;
     JsonValue* val = &node->value;
@@ -847,6 +853,29 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
     } else {
         ImGui::PushID("Root");
     }
+
+    bool in_focus_path = false;
+    bool is_focus_target = false;
+    
+    // The root node (node_index == -1) is passed as a local dummy copy, so we must compare against the true root pointer
+    JsonValue* actual_val = (node_index == -1) ? doc->root_json : val;
+    
+    if (!focus_path.empty() && actual_val != nullptr) {
+        in_focus_path = (std::find(focus_path.begin(), focus_path.end(), actual_val) != focus_path.end());
+        is_focus_target = (actual_val == focus_path.front());
+    }
+
+    auto ApplyFocusTarget = [&]() {
+        if (is_focus_target) {
+            ImGui::SetScrollHereY(0.5f);
+        }
+        if (actual_val != nullptr && actual_val == highlight_val) {
+            float fade = ImMax(0.0f, 1.0f - (float)(ImGui::GetTime() - highlight_time) / 1.5f);
+            if (fade > 0.0f) {
+                ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(255, 255, 0, (int)(100 * fade)));
+            }
+        }
+    };
 
     // Inline Editor for Keys (Only show if it's an object member, omit for array elements)
     if (node->key != nullptr) {
@@ -873,11 +902,16 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
     bool is_container = (val->type == JSON_OBJECT || val->type == JSON_ARRAY);
     bool node_open = false;
 
+    if (in_focus_path && is_container) {
+        ImGui::SetNextItemOpen(true);
+    }
+
     switch (val->type) {
         case JSON_OBJECT:
         case JSON_ARRAY: {
             bool is_obj = (val->type == JSON_OBJECT);
             node_open = ImGui::TreeNodeEx("Node", ImGuiTreeNodeFlags_SpanAvailWidth, "%s (%zu items)", is_obj ? "{...}" : "[...]", val->as.list.count);
+            ApplyFocusTarget();
             break;
         }
         case JSON_STRING: {
@@ -891,6 +925,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 action |= 1;
             }
             if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
+            ApplyFocusTarget();
             break;
         }
         case JSON_NUMBER: {
@@ -899,6 +934,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 action |= 1;
             }
             if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
+            ApplyFocusTarget();
             break;
         }
         case JSON_BOOL: {
@@ -908,10 +944,12 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 val->as.boolean = b;
                 action |= 1;
             }
+            ApplyFocusTarget();
             break;
         }
         case JSON_NULL: {
             ImGui::TextDisabled("null");
+            ApplyFocusTarget();
             break;
         }
     }
@@ -987,6 +1025,22 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             
             bool show_chunk = true;
             if (val->as.list.count > chunk_size) {
+                bool chunk_has_focus = false;
+                if (in_focus_path && focus_path.size() > 1 && actual_val != nullptr) {
+                    auto it = std::find(focus_path.begin(), focus_path.end(), actual_val);
+                    if (it != focus_path.end() && it != focus_path.begin()) {
+                        JsonValue* next_in_path = *(it - 1);
+                        for (size_t i = chunk_start; i < chunk_end; i++) {
+                            if (&val->as.list.items[i].value == next_in_path) {
+                                chunk_has_focus = true; break;
+                            }
+                        }
+                    }
+                }
+                if (chunk_has_focus) {
+                    ImGui::SetNextItemOpen(true);
+                }
+
                 char chunk_label[64];
                 snprintf(chunk_label, sizeof(chunk_label), is_obj ? "{...} [%zu - %zu]" : "[...] [%zu - %zu]", chunk_start, chunk_end - 1);
                 show_chunk = ImGui::TreeNodeEx((void*)(uintptr_t)chunk_start, ImGuiTreeNodeFlags_SpanAvailWidth, "%s", chunk_label);
@@ -994,7 +1048,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             
             if (show_chunk) {
                 for (size_t i = chunk_start; i < chunk_end; i++) {
-                    int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], (int)i, current_path);
+                    int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], (int)i, current_path, focus_path, highlight_val, highlight_time);
                     if (child_action & 1) action |= 1;
                     if (child_action & 2) item_to_remove = (int)i; // Mark child for removal
                 }
@@ -1092,6 +1146,10 @@ int main(int /*argc*/, char** /*argv*/) {
     int highlight_line = -1;
     double highlight_time = 0.0;
     bool force_text_tab = false;
+    bool force_tree_tab = false;
+    std::vector<JsonValue*> tree_focus_path;
+    JsonValue* tree_highlight_val = nullptr;
+    double tree_highlight_time = 0.0;
 
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
@@ -1288,6 +1346,16 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (ImGui::MenuItem("Zoom In", "Ctrl++")) { ImGui::GetIO().FontGlobalScale += 0.1f; zoom_changed = true; }
                 if (ImGui::MenuItem("Zoom Out", "Ctrl+-")) { ImGui::GetIO().FontGlobalScale -= 0.1f; zoom_changed = true; }
                 if (ImGui::MenuItem("Reset Zoom", "Ctrl+0")) { ImGui::GetIO().FontGlobalScale = 1.0f; zoom_changed = true; }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Settings")) {
+                ImGui::TextDisabled("Graph View Double-Click");
+                if (ImGui::RadioButton("Go to Text View", settings.graph_goto_target == 0)) {
+                    settings.graph_goto_target = 0; settings.Save();
+                }
+                if (ImGui::RadioButton("Go to Tree View", settings.graph_goto_target == 1)) {
+                    settings.graph_goto_target = 1; settings.Save();
+                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Stats")) {
@@ -1501,7 +1569,9 @@ int main(int /*argc*/, char** /*argv*/) {
         }
 
         if (ImGui::BeginTabBar("Views")) {
-            if (ImGui::BeginTabItem("Tree View")) {
+            ImGuiTabItemFlags tree_tab_flags = force_tree_tab ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem("Tree View", nullptr, tree_tab_flags)) {
+                force_tree_tab = false;
                 ImGui::BeginChild("TreeChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 if (doc_loading || doc_saving || doc_formatting) {
                     const char* msg = doc_loading ? "Loading and parsing JSON... Please wait." : 
@@ -1514,7 +1584,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     dummy_root.value = *doc->root_json;
                     
                     std::vector<size_t> root_path;
-                    if (DrawEditableJsonNode(doc, &dummy_root, -1, root_path) & 1) {
+                    if (DrawEditableJsonNode(doc, &dummy_root, -1, root_path, tree_focus_path, tree_highlight_val, tree_highlight_time) & 1) {
                         *doc->root_json = dummy_root.value;
                         doc->tree_dirty = true;
                         doc->graph_dirty = true;
@@ -1524,6 +1594,8 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
                 ImGui::EndChild();
                 ImGui::EndTabItem();
+                
+                tree_focus_path.clear();
             }
             
             if (ImGui::BeginTabItem("Graph View")) {
@@ -1566,7 +1638,19 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (hovered_node) {
                         if (hovered_node->type == GraphNodeType::Normal) {
                             if (ImGui::IsMouseDoubleClicked(0)) {
-                                JumpToLine(doc->GetLineFromOffset(hovered_node->offset));
+                                if (settings.graph_goto_target == 0) {
+                                    JumpToLine(doc->GetLineFromOffset(hovered_node->offset));
+                                } else {
+                                    tree_focus_path.clear();
+                                    GraphNode* curr = hovered_node;
+                                    while (curr) {
+                                        tree_focus_path.push_back(curr->source_val);
+                                        curr = curr->parent;
+                                    }
+                                    tree_highlight_val = hovered_node->source_val;
+                                    tree_highlight_time = ImGui::GetTime();
+                                    force_tree_tab = true;
+                                }
                             }
                         } else if (ImGui::IsMouseClicked(0)) {
                             if (hovered_node->type == GraphNodeType::PrevPage) {
