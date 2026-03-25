@@ -330,6 +330,7 @@ typedef struct {
     int flags;
     KeyCacheEntry *key_cache;
     char *last_comment;
+    char *inline_comment;
 } ParseState;
 
 typedef struct NodeBlock NodeBlock;
@@ -362,10 +363,15 @@ static const unsigned char ws_lut[256] = { [' '] = 1, ['\n'] = 1, ['\r'] = 1, ['
 static void skip_whitespace(ParseState *s) {
     char *comments = NULL;
     size_t comm_cap = 0, comm_len = 0;
+    
+    char *inline_comm = NULL;
+    size_t inl_comm_cap = 0, inl_comm_len = 0;
+    bool seen_newline = false;
 
     while (1) {
         const char *p = s->curr;
         const char *end = s->end;
+        const char *p_start = p;
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
         static const char space_chars[16] __attribute__((aligned(16))) = { ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ' };
@@ -391,46 +397,95 @@ static void skip_whitespace(ParseState *s) {
         }
 #endif
         while (p < end && ws_lut[(unsigned char)*p]) p++;
+        
+        if (!seen_newline) {
+            if (memchr(p_start, '\n', p - p_start)) {
+                seen_newline = true;
+            }
+        }
+        
         s->curr = p;
 
         if (s->flags & JSON_PARSE_ALLOW_COMMENTS) {
             if (p + 1 < end && p[0] == '/') {
                 const char *comm_start = p;
+                bool was_newline = seen_newline;
+                
                 if (p[1] == '/') {
                     p += 2;
                     while (p < end && *p != '\n') p++;
                 } else if (p[1] == '*') {
                     p += 2;
-                    while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) p++;
+                    while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) {
+                        if (*p == '\n') seen_newline = true;
+                        p++;
+                    }
                     if (p + 1 < end) p += 2;
                 } else {
                     break;
                 }
 
                 size_t len = p - comm_start;
-                if (!comments) {
-                    comm_cap = len + 128;
-                    comments = arena_alloc_array(s->scratch, char, comm_cap);
-                    memcpy(comments, comm_start, len);
-                    comm_len = len;
-                } else {
-                    if (comm_len + len + 2 > comm_cap) {
-                        size_t new_cap = comm_cap + len + 128;
-                        char *new_comm = arena_alloc_array(s->scratch, char, new_cap);
-                        memcpy(new_comm, comments, comm_len);
-                        comments = new_comm;
-                        comm_cap = new_cap;
+                
+                if (!was_newline && !comments) {
+                    if (!inline_comm) {
+                        inl_comm_cap = len + 128;
+                        inline_comm = arena_alloc_array(s->scratch, char, inl_comm_cap);
+                        memcpy(inline_comm, comm_start, len);
+                        inl_comm_len = len;
+                    } else {
+                        if (inl_comm_len + len + 2 > inl_comm_cap) {
+                            size_t new_cap = inl_comm_cap + len + 128;
+                            char *new_comm = arena_alloc_array(s->scratch, char, new_cap);
+                            memcpy(new_comm, inline_comm, inl_comm_len);
+                            inline_comm = new_comm;
+                            inl_comm_cap = new_cap;
+                        }
+                        inline_comm[inl_comm_len++] = ' ';
+                        memcpy(inline_comm + inl_comm_len, comm_start, len);
+                        inl_comm_len += len;
                     }
-                    comments[comm_len++] = '\n';
-                    memcpy(comments + comm_len, comm_start, len);
-                    comm_len += len;
+                    inline_comm[inl_comm_len] = '\0';
+                } else {
+                    if (!comments) {
+                        comm_cap = len + 128;
+                        comments = arena_alloc_array(s->scratch, char, comm_cap);
+                        memcpy(comments, comm_start, len);
+                        comm_len = len;
+                    } else {
+                        if (comm_len + len + 2 > comm_cap) {
+                            size_t new_cap = comm_cap + len + 128;
+                            char *new_comm = arena_alloc_array(s->scratch, char, new_cap);
+                            memcpy(new_comm, comments, comm_len);
+                            comments = new_comm;
+                            comm_cap = new_cap;
+                        }
+                        comments[comm_len++] = '\n';
+                        memcpy(comments + comm_len, comm_start, len);
+                        comm_len += len;
+                    }
+                    comments[comm_len] = '\0';
                 }
-                comments[comm_len] = '\0';
+                
                 s->curr = p;
                 continue;
             }
         }
         break;
+    }
+
+    if (inline_comm) {
+        if (s->inline_comment) {
+            size_t exist_len = strlen(s->inline_comment);
+            char *merged = arena_alloc_array(s->scratch, char, exist_len + inl_comm_len + 2);
+            memcpy(merged, s->inline_comment, exist_len);
+            merged[exist_len] = ' ';
+            memcpy(merged + exist_len + 1, inline_comm, inl_comm_len);
+            merged[exist_len + 1 + inl_comm_len] = '\0';
+            s->inline_comment = merged;
+        } else {
+            s->inline_comment = inline_comm;
+        }
     }
 
     if (comments) {
@@ -462,6 +517,29 @@ static JsonValue *make_value(Arena *a, JsonType type) {
         }
     }
     return v;
+}
+
+static char *combine_comments(Arena *a, const char *inline_comm, const char *last_comm) {
+    if (inline_comm && last_comm) {
+        size_t l1 = strlen(inline_comm);
+        size_t l2 = strlen(last_comm);
+        char *res = arena_alloc_array(a, char, l1 + l2 + 2);
+        strcpy(res, inline_comm);
+        res[l1] = '\n';
+        strcpy(res + l1 + 1, last_comm);
+        return res;
+    } else if (inline_comm) {
+        size_t len = strlen(inline_comm);
+        char *res = arena_alloc_array(a, char, len + 1);
+        strcpy(res, inline_comm);
+        return res;
+    } else if (last_comm) {
+        size_t len = strlen(last_comm);
+        char *res = arena_alloc_array(a, char, len + 1);
+        strcpy(res, last_comm);
+        return res;
+    }
+    return NULL;
 }
 
 static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int depth);
@@ -699,18 +777,16 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
 
     advance(s, 1); 
     s->last_comment = NULL;
+    s->inline_comment = NULL;
     skip_whitespace(s);
     
     if (s->curr < s->end && *s->curr == ']') {
         advance(s, 1);
         arr->as.list.count = 0;
         arr->as.list.items = NULL;
-        if (s->last_comment) {
-            size_t clen = strlen(s->last_comment);
-            arr->post_comment = arena_alloc_array(main, char, clen + 1);
-            strcpy(arr->post_comment, s->last_comment);
-            s->last_comment = NULL;
-        }
+        arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+        s->last_comment = NULL;
+        s->inline_comment = NULL;
         return true;
     }
 
@@ -744,34 +820,53 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
         total_count++;
 
         s->last_comment = NULL;
+        s->inline_comment = NULL;
         skip_whitespace(s);
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
         
+        if (s->inline_comment) {
+            size_t clen = strlen(s->inline_comment);
+            node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(node->value.trailing_comment, s->inline_comment);
+            s->inline_comment = NULL;
+        }
+
         char c = *s->curr;
         if (c == ',') {
             advance(s, 1);
             if (s->flags & JSON_PARSE_ALLOW_COMMENTS) {
                 skip_whitespace(s);
+                if (s->inline_comment) {
+                    if (node->value.trailing_comment) {
+                        size_t ex = strlen(node->value.trailing_comment);
+                        size_t add = strlen(s->inline_comment);
+                        char *merged = arena_alloc_array(main, char, ex + add + 2);
+                        strcpy(merged, node->value.trailing_comment);
+                        merged[ex] = ' ';
+                        strcpy(merged + ex + 1, s->inline_comment);
+                        node->value.trailing_comment = merged;
+                    } else {
+                        size_t clen = strlen(s->inline_comment);
+                        node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
+                        strcpy(node->value.trailing_comment, s->inline_comment);
+                    }
+                    s->inline_comment = NULL;
+                }
+                
                 if (s->curr < s->end && *s->curr == ']') {
                     advance(s, 1);
-                    if (s->last_comment) {
-                        size_t clen = strlen(s->last_comment);
-                        arr->post_comment = arena_alloc_array(main, char, clen + 1);
-                        strcpy(arr->post_comment, s->last_comment);
-                        s->last_comment = NULL;
-                    }
+                    arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+                    s->last_comment = NULL;
+                    s->inline_comment = NULL;
                     break;
                 }
             }
         } 
         else if (c == ']') { 
             advance(s, 1); 
-            if (s->last_comment) {
-                size_t clen = strlen(s->last_comment);
-                arr->post_comment = arena_alloc_array(main, char, clen + 1);
-                strcpy(arr->post_comment, s->last_comment);
-                s->last_comment = NULL;
-            }
+            arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+            s->last_comment = NULL;
+            s->inline_comment = NULL;
             break; 
         } 
         else { set_error(s, "Expected ',' or ']'"); return false; }
@@ -798,18 +893,16 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
 
     advance(s, 1); 
     s->last_comment = NULL;
+    s->inline_comment = NULL;
     skip_whitespace(s);
 
     if (s->curr < s->end && *s->curr == '}') {
         advance(s, 1);
         obj->as.list.count = 0;
         obj->as.list.items = NULL;
-        if (s->last_comment) {
-            size_t clen = strlen(s->last_comment);
-            obj->post_comment = arena_alloc_array(main, char, clen + 1);
-            strcpy(obj->post_comment, s->last_comment);
-            s->last_comment = NULL;
-        }
+        obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+        s->last_comment = NULL;
+        s->inline_comment = NULL;
         return true;
     }
 
@@ -828,8 +921,9 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
         if (*s->curr != '"') { set_error(s, "Expected key"); return false; }
 
-        char *key_comment = s->last_comment;
+        char *key_comment = combine_comments(main, s->inline_comment, s->last_comment);
         s->last_comment = NULL;
+        s->inline_comment = NULL;
 
         if (curr_block->count == BLOCK_CAPACITY) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
@@ -849,11 +943,7 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         if (s->curr >= s->end || *s->curr != ':') { set_error(s, "Expected ':'"); return false; }
         advance(s, 1); 
 
-        if (key_comment) {
-            size_t clen = strlen(key_comment);
-            node->pre_comment = arena_alloc_array(main, char, clen + 1);
-            strcpy(node->pre_comment, key_comment);
-        }
+        node->pre_comment = key_comment;
 
         if (!parse_element(main, s, &node->value, depth + 1)) return false;
         
@@ -861,34 +951,53 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         total_count++;
 
         s->last_comment = NULL;
+        s->inline_comment = NULL;
         skip_whitespace(s);
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
+
+        if (s->inline_comment) {
+            size_t clen = strlen(s->inline_comment);
+            node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(node->value.trailing_comment, s->inline_comment);
+            s->inline_comment = NULL;
+        }
 
         char c = *s->curr;
         if (c == ',') {
             advance(s, 1);
             if (s->flags & JSON_PARSE_ALLOW_COMMENTS) {
                 skip_whitespace(s);
+                if (s->inline_comment) {
+                    if (node->value.trailing_comment) {
+                        size_t ex = strlen(node->value.trailing_comment);
+                        size_t add = strlen(s->inline_comment);
+                        char *merged = arena_alloc_array(main, char, ex + add + 2);
+                        strcpy(merged, node->value.trailing_comment);
+                        merged[ex] = ' ';
+                        strcpy(merged + ex + 1, s->inline_comment);
+                        node->value.trailing_comment = merged;
+                    } else {
+                        size_t clen = strlen(s->inline_comment);
+                        node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
+                        strcpy(node->value.trailing_comment, s->inline_comment);
+                    }
+                    s->inline_comment = NULL;
+                }
+
                 if (s->curr < s->end && *s->curr == '}') {
                     advance(s, 1);
-                    if (s->last_comment) {
-                        size_t clen = strlen(s->last_comment);
-                        obj->post_comment = arena_alloc_array(main, char, clen + 1);
-                        strcpy(obj->post_comment, s->last_comment);
-                        s->last_comment = NULL;
-                    }
+                    obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+                    s->last_comment = NULL;
+                    s->inline_comment = NULL;
                     break;
                 }
             }
         } 
         else if (c == '}') { 
             advance(s, 1); 
-            if (s->last_comment) {
-                size_t clen = strlen(s->last_comment);
-                obj->post_comment = arena_alloc_array(main, char, clen + 1);
-                strcpy(obj->post_comment, s->last_comment);
-                s->last_comment = NULL;
-            }
+            obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+            s->last_comment = NULL;
+            s->inline_comment = NULL;
             break; 
         } 
         else { set_error(s, "Expected ',' or '}'"); return false; }
@@ -963,14 +1072,9 @@ static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int de
     if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
     out_val->offset = s->curr - s->start;
 
-    if (s->last_comment) {
-        size_t clen = strlen(s->last_comment);
-        out_val->pre_comment = arena_alloc_array(main, char, clen + 1);
-        strcpy(out_val->pre_comment, s->last_comment);
-        s->last_comment = NULL;
-    } else {
-        out_val->pre_comment = NULL;
-    }
+    out_val->pre_comment = combine_comments(main, s->inline_comment, s->last_comment);
+    s->last_comment = NULL;
+    s->inline_comment = NULL;
     out_val->post_comment = NULL;
     out_val->trailing_comment = NULL;
 
@@ -990,6 +1094,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.err = err; s.scratch = scratch;
     s.flags = flags;
     s.last_comment = NULL;
+    s.inline_comment = NULL;
     s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * KEY_CACHE_CAPACITY);
 
     JsonValue *root = arena_alloc_struct(main, JsonValue);
@@ -998,11 +1103,12 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     if (!parse_element(main, &s, root, 0)) return NULL;
     
     s.last_comment = NULL;
+    s.inline_comment = NULL;
     skip_whitespace(&s);
-    if (s.last_comment) {
-        size_t clen = strlen(s.last_comment);
-        root->trailing_comment = arena_alloc_array(main, char, clen + 1);
-        strcpy(root->trailing_comment, s.last_comment);
+    
+    char *trail = combine_comments(main, s.inline_comment, s.last_comment);
+    if (trail) {
+        root->trailing_comment = trail;
     }
 
     if (s.curr != s.end) {
@@ -1319,6 +1425,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                     }
+                    
+                    if (keep_comments && child->trailing_comment) {
+                        if (pretty) sb_putc(sb, ' ');
+                        sb_append(sb, child->trailing_comment, strlen(child->trailing_comment));
+                    }
                 }
                 if (keep_comments && v->post_comment) {
                     if (pretty) {
@@ -1375,6 +1486,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                     }
+
+                    if (keep_comments && child->trailing_comment) {
+                        if (pretty) sb_putc(sb, ' ');
+                        sb_append(sb, child->trailing_comment, strlen(child->trailing_comment));
+                    }
                 }
                 if (keep_comments && v->post_comment) {
                     if (pretty) {
@@ -1400,7 +1516,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
     }
 
     if (keep_comments && depth == 0 && v->trailing_comment) {
-        if (pretty) sb_putc(sb, '\n');
+        if (pretty) sb_putc(sb, ' ');
         sb_append(sb, v->trailing_comment, strlen(v->trailing_comment));
     }
 }
