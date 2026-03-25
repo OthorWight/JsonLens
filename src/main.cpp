@@ -362,15 +362,32 @@ struct LargeTextFile {
     void BuildLineOffsets() {
         line_offsets.clear();
         if (!data) return;
+        
+        // Pre-allocate space to avoid heavy reallocation overhead on large files.
+        // Assuming an average line length of ~50 characters.
+        line_offsets.reserve(size / 50 + 1024);
         line_offsets.push_back(0);
-        size_t line_len = 0;
-        for (size_t i = 0; i < size; i++) {
-            line_len++;
-            if (data[i] == '\n' || line_len >= 4096) { // Artificially wrap massive single-line minified files to prevent UI freeze
-                line_offsets.push_back(i + 1);
-                line_len = 0;
+        
+        size_t start = 0;
+        while (start < size) {
+            size_t remain = size - start;
+            size_t chunk = (remain > 4096) ? 4096 : remain;
+            
+            const void* p = memchr(data + start, '\n', chunk);
+            if (p) {
+                size_t next_start = (size_t)((const char*)p - data) + 1;
+                line_offsets.push_back(next_start);
+                start = next_start;
+            } else if (remain >= 4096) {
+                line_offsets.push_back(start + 4096);
+                start += 4096;
+            } else {
+                break;
             }
         }
+        
+        // Free any unused capacity if our size/50 estimate was too generous (e.g., minified JSON)
+        line_offsets.shrink_to_fit();
     }
 
     int GetLineFromOffset(size_t off) const {
