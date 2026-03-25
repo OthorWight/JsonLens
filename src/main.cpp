@@ -735,6 +735,35 @@ struct LargeTextFile {
         redo_stack.pop_back();
         return ExecuteHistoryAction(rec, undo_stack, false);
     }
+
+    void ReplaceLine(int line_idx, const char* new_text) {
+        if (line_idx < 0 || line_idx >= (int)line_offsets.size()) return;
+        size_t start = line_offsets[line_idx];
+        size_t end = (line_idx + 1 < (int)line_offsets.size()) ? line_offsets[line_idx + 1] : size;
+        
+        size_t text_end = end;
+        if (text_end > start && data[text_end - 1] == '\n') text_end--;
+        if (text_end > start && data[text_end - 1] == '\r') text_end--;
+        
+        size_t old_len = text_end - start;
+        size_t new_len = strlen(new_text);
+        
+        UndoRecord rec{};
+        rec.action = UndoActionType::TextReplace;
+        rec.text_deltas.push_back({start, std::string(data + start, old_len), std::string(new_text, new_len)});
+        undo_stack.push_back(std::move(rec));
+        redo_stack.clear();
+
+        if (size - old_len + new_len >= data_capacity) {
+            data_capacity = size + new_len + 1024 * 1024;
+            data = (char*)realloc(data, data_capacity);
+        }
+        
+        memmove(data + start + new_len, data + start + old_len, size - start - old_len);
+        memcpy(data + start, new_text, new_len);
+        size = size - old_len + new_len;
+        data[size] = '\0';
+    }
 };
 
 static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string& key, int depth, int& node_count) {
@@ -1206,6 +1235,9 @@ int main(int /*argc*/, char** /*argv*/) {
     JsonValue* tree_highlight_val = nullptr;
     double tree_highlight_time = 0.0;
 
+    int error_fix_line = -1;
+    std::vector<char> error_fix_buf;
+
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
         scroll_to_line = line;
@@ -1376,6 +1408,7 @@ int main(int /*argc*/, char** /*argv*/) {
         if (LargeTextFile* ready_doc = doc_ready.exchange(nullptr)) {
             delete doc;
             doc = ready_doc;
+            error_fix_line = -1;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -1632,6 +1665,46 @@ int main(int /*argc*/, char** /*argv*/) {
                     JumpToLine(doc->last_err.line - 1);
                 }
             }
+            
+            int err_line_idx = doc->last_err.line - 1;
+            if (err_line_idx >= 0 && err_line_idx < (int)doc->line_offsets.size()) {
+                if (error_fix_line != err_line_idx) {
+                    size_t start = doc->line_offsets[err_line_idx];
+                    size_t end = (err_line_idx + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[err_line_idx + 1] : doc->size;
+                    size_t text_end = end;
+                    if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                    if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                    size_t len = text_end - start;
+                    
+                    error_fix_buf.resize(len + 8192); // Provide a generous 8KB buffer for typing edits
+                    memcpy(error_fix_buf.data(), doc->data + start, len);
+                    error_fix_buf[len] = '\0';
+                    error_fix_line = err_line_idx;
+                }
+                
+                bool apply_fix = false;
+                ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Apply Fix").x - style.ItemSpacing.x * 2.0f);
+                if (ImGui::InputText("##ErrorFix", error_fix_buf.data(), error_fix_buf.size(), ImGuiInputTextFlags_EnterReturnsTrue)) apply_fix = true;
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Fix")) apply_fix = true;
+
+                if (apply_fix) {
+                    doc->ReplaceLine(err_line_idx, error_fix_buf.data());
+                    doc->ClearAstHistory();
+                    doc_formatting = true;
+                    bool allow_comments = settings.allow_comments;
+                    if (doc_thread.joinable()) doc_thread.join();
+                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
+                        doc->RebuildTreeFromText(allow_comments); 
+                        doc_formatting = false; 
+                        search_dirty = true; 
+                    });
+                    error_fix_line = -1;
+                }
+            }
+        } else {
+            error_fix_line = -1;
         }
 
         if (show_search_bar && doc->data) {
