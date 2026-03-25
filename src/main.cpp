@@ -1148,13 +1148,14 @@ int main(int /*argc*/, char** /*argv*/) {
     bool force_text_tab = false;
     bool force_tree_tab = false;
     std::vector<JsonValue*> tree_focus_path;
+    int tree_focus_frames = 0;
     JsonValue* tree_highlight_val = nullptr;
     double tree_highlight_time = 0.0;
 
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
         scroll_to_line = line;
-        scroll_to_line_frames = 2;
+        scroll_to_line_frames = 3;
         highlight_line = line;
         highlight_time = ImGui::GetTime();
         force_text_tab = true;
@@ -1601,7 +1602,11 @@ int main(int /*argc*/, char** /*argv*/) {
                 ImGui::EndChild();
                 ImGui::EndTabItem();
                 
-                tree_focus_path.clear();
+                if (tree_focus_frames > 0) {
+                    tree_focus_frames--;
+                } else {
+                    tree_focus_path.clear();
+                }
             }
             
             if (ImGui::BeginTabItem("Graph View")) {
@@ -1656,6 +1661,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                     tree_highlight_val = hovered_node->source_val;
                                     tree_highlight_time = ImGui::GetTime();
                                     force_tree_tab = true;
+                                    tree_focus_frames = 3;
                                 }
                             }
                         } else if (ImGui::IsMouseClicked(0)) {
@@ -1748,7 +1754,7 @@ int main(int /*argc*/, char** /*argv*/) {
                         if (scroll_to_line >= 0 && scroll_to_line_frames > 0) {
                             double item_height = std::floor((double)ImGui::GetTextLineHeightWithSpacing());
                             double target_y = (double)scroll_to_line * item_height;
-                            ImGui::SetScrollY((float)(target_y - (double)ImGui::GetWindowHeight() * 0.5));
+                            ImGui::SetScrollY((float)(target_y - (double)ImGui::GetWindowHeight() * 0.5 + item_height * 0.5));
                             scroll_to_line_frames--;
                         } else {
                             scroll_to_line = -1;
