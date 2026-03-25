@@ -1414,7 +1414,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
     }
 
     if (depth == 0 && v->trailing_comment) {
-        sb_putc(sb, '\n');
+        if (pretty) sb_putc(sb, '\n');
         sb_append(sb, v->trailing_comment, strlen(v->trailing_comment));
     }
 }
