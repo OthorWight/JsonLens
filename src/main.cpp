@@ -1367,6 +1367,14 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
                 ImGui::EndMenu();
             }
+            
+            // Push the Stats menu to the far right
+            float stats_width = ImGui::CalcTextSize("Stats").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+            float avail_width = ImGui::GetContentRegionAvail().x;
+            if (avail_width > stats_width) {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_width - stats_width);
+            }
+
             if (ImGui::BeginMenu("Stats")) {
                 if (doc->data) {
                     ImGui::TextDisabled("File Size: %s", FormatMemory(doc->size).c_str());
