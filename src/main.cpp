@@ -1206,13 +1206,24 @@ int main(int /*argc*/, char** /*argv*/) {
 
                 if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
                     JsonValue* best_child = nullptr;
-                    size_t best_dist = (size_t)-1;
                     for (size_t i = 0; i < val->as.list.count; ++i) {
                         JsonValue* child = &val->as.list.items[i].value;
-                        size_t dist = (offset > child->offset) ? (offset - child->offset) : (child->offset - offset);
-                        if (dist < best_dist) {
-                            best_dist = dist;
+                        if (i + 1 < val->as.list.count) {
+                            size_t next_offset = val->as.list.items[i+1].value.offset;
+                            size_t boundary = next_offset;
+                            while (boundary > child->offset && doc->data[boundary] != ',') {
+                                boundary--;
+                            }
+                            if (boundary <= child->offset) {
+                                boundary = child->offset + (next_offset - child->offset) / 2;
+                            }
+                            if (offset < boundary) {
+                                best_child = child;
+                                break;
+                            }
+                        } else {
                             best_child = child;
+                            break;
                         }
                     }
                     if (best_child) find_closest(best_child);
