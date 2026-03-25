@@ -1464,6 +1464,12 @@ int main(int /*argc*/, char** /*argv*/) {
 
         if (!doc_loading && !doc_saving && !doc_formatting && doc->root_json == nullptr && doc->data != nullptr) {
             ImGui::TextColored(ImVec4(1, 0, 0, 1), "JSON Parse Error at Line %d, Col %d: %s", doc->last_err.line, doc->last_err.col, doc->last_err.msg);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (ImGui::IsMouseClicked(0)) {
+                    JumpToLine(doc->last_err.line - 1);
+                }
+            }
         }
 
         if (show_search_bar && doc->data) {
@@ -1695,21 +1701,29 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (doc->data) {
                         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Ensure monospace if loaded
                         
-                        ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
                         float char_width = ImGui::CalcTextSize("A").x;
+                        ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
                         
                         auto GetOffsetFromMouse = [&]() -> size_t {
                             if (doc->line_offsets.empty()) return 0;
-                            float y = ImGui::GetMousePos().y - text_start_pos.y;
-                            int raw_line_idx = (int)(y / ImGui::GetTextLineHeight());
+                            
+                            double item_height = std::floor((double)ImGui::GetTextLineHeightWithSpacing());
+                            double scroll_y = (double)ImGui::GetScrollY();
+                            double window_y = (double)ImGui::GetWindowPos().y;
+                            double padding_y = (double)ImGui::GetStyle().WindowPadding.y;
+                            
+                            double local_mouse_y = (double)ImGui::GetMousePos().y - window_y - padding_y + scroll_y;
+                            int raw_line_idx = (int)(local_mouse_y / item_height);
+                            
                             if (raw_line_idx < 0) raw_line_idx = 0;
                             size_t line_idx = (size_t)raw_line_idx;
                             if (line_idx >= doc->line_offsets.size()) line_idx = doc->line_offsets.size() - 1;
                             size_t line_start = doc->line_offsets[line_idx];
                             size_t line_end = (line_idx + 1 < doc->line_offsets.size()) ? doc->line_offsets[line_idx + 1] : doc->size;
                             if (line_end > line_start && doc->data[line_end - 1] == '\n') line_end--;
-                            float x = ImGui::GetMousePos().x - text_start_pos.x;
-                            size_t char_idx = x > 0 ? (size_t)(x / char_width + 0.5f) : 0;
+                            
+                            float local_mouse_x = ImGui::GetMousePos().x - text_start_pos.x;
+                            size_t char_idx = local_mouse_x > 0 ? (size_t)(local_mouse_x / char_width + 0.5f) : 0;
                             return std::min(line_start + char_idx, line_end);
                         };
 
@@ -1732,8 +1746,9 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
 
                         if (scroll_to_line >= 0 && scroll_to_line_frames > 0) {
-                            float target_y = ImGui::GetCursorPosY() + scroll_to_line * ImGui::GetTextLineHeightWithSpacing();
-                            ImGui::SetScrollY(target_y - ImGui::GetWindowHeight() * 0.5f);
+                            double item_height = std::floor((double)ImGui::GetTextLineHeightWithSpacing());
+                            double target_y = (double)scroll_to_line * item_height;
+                            ImGui::SetScrollY((float)(target_y - (double)ImGui::GetWindowHeight() * 0.5));
                             scroll_to_line_frames--;
                         } else {
                             scroll_to_line = -1;
