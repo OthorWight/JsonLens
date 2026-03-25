@@ -772,9 +772,25 @@ static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::
 
         size_t actual_count = 0;
         for (size_t i = start_idx; i < start_idx + count; i++) {
-            if (node_count > 100000) break; // Global cap reached
+            if (node_count > 100000) {
+                if (depth == 1) {
+                    delete node;
+                    return nullptr;
+                }
+                break; // Global cap reached
+            }
+
             std::string child_key = (val->type == JSON_OBJECT) ? (val->as.list.items[i].key ? val->as.list.items[i].key : "") : ("[" + std::to_string(i) + "]");
             GraphNode* child = BuildGraphNode(doc, &val->as.list.items[i].value, child_key, depth + 1, node_count);
+            
+            if (!child && node_count > 100000) {
+                if (depth == 1) {
+                    delete node;
+                    return nullptr;
+                }
+                break;
+            }
+            
             if (child) { child->parent = node; node->children.push_back(child); actual_count++; }
         }
         
