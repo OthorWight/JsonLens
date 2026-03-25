@@ -127,7 +127,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
 JsonValue *json_get(JsonValue *obj, const char *key);
 JsonValue *json_at(JsonValue *arr, int index);
 void json_print(JsonValue *v, int indent);
-char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step);
+char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments);
 
 /* --- Iteration Macros --- */
 #define json_array_foreach(node, arr) \
@@ -1253,10 +1253,10 @@ static void w_escaped_string(StrBuilder *sb, const char *s) {
     sb_putc(sb, '"');
 }
 
-static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pretty, bool use_tabs, int indent_step) {
+static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pretty, bool use_tabs, int indent_step, bool keep_comments) {
     if (!v) return;
 
-    if (v->pre_comment) {
+    if (keep_comments && v->pre_comment) {
         sb_append(sb, v->pre_comment, strlen(v->pre_comment));
         if (pretty) sb_putc(sb, '\n');
         if (pretty && depth > 0) {
@@ -1300,11 +1300,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         case JSON_STRING: w_escaped_string(sb, v->as.string); break;
         case JSON_ARRAY: {
             sb_putc(sb, '[');
-            if (v->as.list.count > 0 || v->post_comment) {
+            if (v->as.list.count > 0 || (keep_comments && v->post_comment)) {
                 for (size_t i = 0; i < v->as.list.count; i++) {
                     JsonValue *child = &v->as.list.items[i].value;
                     
-                    if (child->pre_comment) {
+                    if (keep_comments && child->pre_comment) {
                         if (pretty) {
                             sb_putc(sb, '\n');
                             for (int j = 0; j < depth + 1; j++) {
@@ -1325,14 +1325,14 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     
                     char *temp = child->pre_comment;
                     child->pre_comment = NULL;
-                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step);
+                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step, keep_comments);
                     child->pre_comment = temp;
                     
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                     }
                 }
-                if (v->post_comment) {
+                if (keep_comments && v->post_comment) {
                     if (pretty) {
                         sb_putc(sb, '\n');
                         for (int j = 0; j < depth + 1; j++) {
@@ -1355,11 +1355,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         }
         case JSON_OBJECT: {
             sb_putc(sb, '{');
-            if (v->as.list.count > 0 || v->post_comment) {
+            if (v->as.list.count > 0 || (keep_comments && v->post_comment)) {
                 for (size_t i = 0; i < v->as.list.count; i++) {
                     JsonValue *child = &v->as.list.items[i].value;
                     
-                    if (child->pre_comment) {
+                    if (keep_comments && child->pre_comment) {
                         if (pretty) {
                             sb_putc(sb, '\n');
                             for (int j = 0; j < depth + 1; j++) {
@@ -1383,14 +1383,14 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     
                     char *temp = child->pre_comment;
                     child->pre_comment = NULL;
-                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step);
+                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step, keep_comments);
                     child->pre_comment = temp;
                     
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                     }
                 }
-                if (v->post_comment) {
+                if (keep_comments && v->post_comment) {
                     if (pretty) {
                         sb_putc(sb, '\n');
                         for (int j = 0; j < depth + 1; j++) {
@@ -1413,17 +1413,17 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         }
     }
 
-    if (depth == 0 && v->trailing_comment) {
+    if (keep_comments && depth == 0 && v->trailing_comment) {
         if (pretty) sb_putc(sb, '\n');
         sb_append(sb, v->trailing_comment, strlen(v->trailing_comment));
     }
 }
 
-char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step) {
+char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments) {
     if (!a || !v) return NULL;
     StrBuilder sb;
     sb_init(&sb);
-    json_write_internal(v, &sb, 0, pretty, use_tabs, indent_step);
+    json_write_internal(v, &sb, 0, pretty, use_tabs, indent_step, keep_comments);
     char *result = arena_alloc_array(a, char, sb.len + 1);
     if (result && sb.buf) {
         memcpy(result, sb.buf, sb.len);

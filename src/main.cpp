@@ -280,7 +280,7 @@ struct AppSettings {
         json_add_number(&arena, root, "indent_size", (double)indent_size);
         json_add_number(&arena, root, "pagination_size", (double)pagination_size);
 
-        char* str = json_to_string(&arena, root, true, false, 4);
+        char* str = json_to_string(&arena, root, true, false, 4, false); // Internal settings never need comments
         if (str) {
             FILE* f = fopen(path.c_str(), "wb");
             if (f) {
@@ -488,7 +488,7 @@ struct LargeTextFile {
         printf("------------------\n");
     }
 
-    void RebuildTextFromTree(bool use_tabs, int indent_step) {
+    void RebuildTextFromTree(bool use_tabs, int indent_step, bool keep_comments) {
         if (!tree_dirty || !root_json) return;
         
         Uint64 t_freq = SDL_GetPerformanceFrequency();
@@ -497,7 +497,7 @@ struct LargeTextFile {
         arena_free(&scratch_arena);
         arena_init(&scratch_arena);
         
-        char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step);
+        char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step, keep_comments);
         if (new_text) {
             size_t new_len = strlen(new_text);
             if (new_len >= data_capacity) {
@@ -526,8 +526,8 @@ struct LargeTextFile {
         printf("--------------------\n");
     }
 
-    void SaveToFile(const char* filepath, bool use_tabs, int indent_step) {
-        RebuildTextFromTree(use_tabs, indent_step); // Ensure the text buffer matches the current tree
+    void SaveToFile(const char* filepath, bool use_tabs, int indent_step, bool keep_comments) {
+        RebuildTextFromTree(use_tabs, indent_step, keep_comments); // Ensure the text buffer matches the current tree
         if (!data) return;
         FILE* f = fopen(filepath, "wb");
         if (!f) return;
@@ -1318,8 +1318,9 @@ int main(int /*argc*/, char** /*argv*/) {
             
             bool use_tabs = settings.use_tabs;
             int indent_size = settings.indent_size;
-            doc_thread = std::thread([doc, path, use_tabs, indent_size, &doc_saving]() {
-                doc->SaveToFile(path.c_str(), use_tabs, indent_size);
+            bool keep_comments = settings.allow_comments;
+            doc_thread = std::thread([doc, path, use_tabs, indent_size, keep_comments, &doc_saving]() {
+                doc->SaveToFile(path.c_str(), use_tabs, indent_size, keep_comments);
                 doc_saving = false;
             });
         }
@@ -1332,11 +1333,12 @@ int main(int /*argc*/, char** /*argv*/) {
             
             bool use_tabs = settings.use_tabs;
             int indent_size = settings.indent_size;
-            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, &doc_formatting, &search_dirty]() {
+            bool keep_comments = settings.allow_comments;
+            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, keep_comments, &doc_formatting, &search_dirty]() {
                 std::string old_text(doc->data, doc->size);
                 doc->is_pretty = pretty;
                 doc->tree_dirty = true;
-                doc->RebuildTextFromTree(use_tabs, indent_size);
+                doc->RebuildTextFromTree(use_tabs, indent_size, keep_comments);
                 
                 if (doc->data) {
                     std::string new_text(doc->data, doc->size);
@@ -1454,7 +1456,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy All", "Ctrl+Shift+C", false, has_doc)) {
-                    if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size);
+                    if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size, settings.allow_comments);
                     ImGui::SetClipboardText(doc->data);
                 }
                 ImGui::Separator();
@@ -1559,7 +1561,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
         if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
             if (!doc_loading && !doc_saving && !doc_formatting && doc->data) {
-                if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size);
+                if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size, settings.allow_comments);
                 ImGui::SetClipboardText(doc->data);
             }
         }
@@ -1863,9 +1865,10 @@ int main(int /*argc*/, char** /*argv*/) {
                     doc_formatting = true;
                     bool use_tabs = settings.use_tabs;
                     int indent_size = settings.indent_size;
+                    bool keep_comments = settings.allow_comments;
                     if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, use_tabs, indent_size, &doc_formatting, &search_dirty]() {
-                        doc->RebuildTextFromTree(use_tabs, indent_size);
+                    doc_thread = std::thread([doc, use_tabs, indent_size, keep_comments, &doc_formatting, &search_dirty]() {
+                        doc->RebuildTextFromTree(use_tabs, indent_size, keep_comments);
                         doc_formatting = false;
                         search_dirty = true;
                     });
