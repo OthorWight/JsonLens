@@ -115,6 +115,7 @@ typedef struct JsonValue {
 } JsonValue;
 
 struct JsonNode {
+    char *pre_comment;
     char *key;       
     JsonValue value; 
 };
@@ -735,6 +736,7 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
 
         JsonNode *node = &curr_block->items[curr_block->count];
         node->key = NULL;
+        node->pre_comment = NULL;
         
         if (!parse_element(main, s, &node->value, depth + 1)) return false;
         
@@ -839,6 +841,7 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         }
 
         JsonNode *node = &curr_block->items[curr_block->count];
+        node->pre_comment = NULL;
 
         if (!parse_string(main, s, &node->key)) return false;
 
@@ -847,18 +850,9 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         advance(s, 1); 
 
         if (key_comment) {
-            if (s->last_comment) {
-                size_t kl = strlen(key_comment);
-                size_t sl = strlen(s->last_comment);
-                char *merged = arena_alloc_array(s->scratch, char, kl + sl + 2);
-                memcpy(merged, key_comment, kl);
-                merged[kl] = '\n';
-                memcpy(merged + kl + 1, s->last_comment, sl);
-                merged[kl + 1 + sl] = '\0';
-                s->last_comment = merged;
-            } else {
-                s->last_comment = key_comment;
-            }
+            size_t clen = strlen(key_comment);
+            node->pre_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(node->pre_comment, key_comment);
         }
 
         if (!parse_element(main, s, &node->value, depth + 1)) return false;
@@ -1184,6 +1178,15 @@ JsonValue* json_clone(Arena *dest_arena, JsonValue *src) {
                     size_t klen = strlen(src->as.list.items[i].key);
                     new_val->as.list.items[i].key = arena_alloc_array(dest_arena, char, klen + 1);
                     memcpy(new_val->as.list.items[i].key, src->as.list.items[i].key, klen + 1);
+                } else {
+                    new_val->as.list.items[i].key = NULL;
+                }
+                if (src->as.list.items[i].pre_comment) {
+                    size_t clen = strlen(src->as.list.items[i].pre_comment);
+                    new_val->as.list.items[i].pre_comment = arena_alloc_array(dest_arena, char, clen + 1);
+                    strcpy(new_val->as.list.items[i].pre_comment, src->as.list.items[i].pre_comment);
+                } else {
+                    new_val->as.list.items[i].pre_comment = NULL;
                 }
                 JsonValue *cloned_sub = json_clone(dest_arena, &src->as.list.items[i].value);
                 new_val->as.list.items[i].value = *cloned_sub;
@@ -1304,16 +1307,6 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                 for (size_t i = 0; i < v->as.list.count; i++) {
                     JsonValue *child = &v->as.list.items[i].value;
                     
-                    if (keep_comments && child->pre_comment) {
-                        if (pretty) {
-                            sb_putc(sb, '\n');
-                            for (int j = 0; j < depth + 1; j++) {
-                                if (use_tabs) sb_putc(sb, '\t');
-                                else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
-                            }
-                        }
-                        sb_append(sb, child->pre_comment, strlen(child->pre_comment));
-                    }
                     
                     if (pretty) {
                         sb_putc(sb, '\n');
@@ -1323,10 +1316,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     
-                    char *temp = child->pre_comment;
-                    child->pre_comment = NULL;
                     json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step, keep_comments);
-                    child->pre_comment = temp;
                     
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
@@ -1357,9 +1347,10 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
             sb_putc(sb, '{');
             if (v->as.list.count > 0 || (keep_comments && v->post_comment)) {
                 for (size_t i = 0; i < v->as.list.count; i++) {
-                    JsonValue *child = &v->as.list.items[i].value;
+                    JsonNode *node = &v->as.list.items[i];
+                    JsonValue *child = &node->value;
                     
-                    if (keep_comments && child->pre_comment) {
+                    if (keep_comments && node->pre_comment) {
                         if (pretty) {
                             sb_putc(sb, '\n');
                             for (int j = 0; j < depth + 1; j++) {
@@ -1367,7 +1358,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                                 else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
                             }
                         }
-                        sb_append(sb, child->pre_comment, strlen(child->pre_comment));
+                        sb_append(sb, node->pre_comment, strlen(node->pre_comment));
                     }
                     
                     if (pretty) {
@@ -1378,13 +1369,10 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     
-                    w_escaped_string(sb, v->as.list.items[i].key);
+                    w_escaped_string(sb, node->key);
                     sb_append(sb, pretty ? ": " : ":", pretty ? 2 : 1);
                     
-                    char *temp = child->pre_comment;
-                    child->pre_comment = NULL;
                     json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step, keep_comments);
-                    child->pre_comment = temp;
                     
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
@@ -1475,6 +1463,7 @@ static void json_list_append(Arena *a, JsonValue *parent, const char *key, JsonV
         new_items[old_count].key = NULL;
     }
     
+    new_items[old_count].pre_comment = NULL;
     new_items[old_count].value = *val;
     parent->as.list.items = new_items;
     parent->as.list.count = old_count + 1;
