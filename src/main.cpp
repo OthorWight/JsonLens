@@ -464,7 +464,6 @@ struct LargeTextFile {
         Uint64 t1 = SDL_GetPerformanceCounter();
         load_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
 
-        // Parse the JSON using the fast Arena allocator
         Uint64 t2 = SDL_GetPerformanceCounter();
         int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
         root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
@@ -1034,7 +1033,6 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         }
     }
     
-    // Right-Click Context Menu for structural edits
     if (ImGui::BeginPopupContextItem("node_context")) {
         ImGui::TextDisabled("Change Type");
         ImGui::Separator();
@@ -1092,7 +1090,6 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         ImGui::EndPopup();
     }
 
-    // Draw nested items if the node is expanded
     if (is_container && node_open) {
         bool is_obj = (val->type == JSON_OBJECT);
         int item_to_remove = -1;
@@ -1182,7 +1179,7 @@ int main(int /*argc*/, char** /*argv*/) {
     SDL_Window* window = SDL_CreateWindow("JsonLens - Dear ImGui", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1); // Enable vsync
+    SDL_GL_SetSwapInterval(1);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1192,11 +1189,11 @@ int main(int /*argc*/, char** /*argv*/) {
     ImGui::StyleColorsDark();
     
     ImGuiStyle& style = ImGui::GetStyle();
-    style.Colors[ImGuiCol_PopupBg]   = ImVec4(0.15f, 0.15f, 0.15f, 0.98f); // Lighter gray background for dropdowns
-    style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.00f); // Slightly lighter menu bar
-    style.Colors[ImGuiCol_Border]    = ImVec4(0.30f, 0.30f, 0.30f, 1.00f); // Crisp subtle border
-    style.PopupRounding              = 4.0f; // Soften popup corners
-    style.FrameRounding              = 3.0f; // Soften text inputs and buttons
+    style.Colors[ImGuiCol_PopupBg]   = ImVec4(0.15f, 0.15f, 0.15f, 0.98f);
+    style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    style.Colors[ImGuiCol_Border]    = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+    style.PopupRounding              = 4.0f;
+    style.FrameRounding              = 3.0f;
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -1391,7 +1388,6 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
-    // Application Main Loop
     bool done = false;
     while (!done) {
         bool zoom_changed = false;

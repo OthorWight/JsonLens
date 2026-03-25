@@ -1116,7 +1116,6 @@ JsonValue* json_detach_from_object(Arena *a, JsonValue *obj, const char *key) {
     
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (strcmp(obj->as.list.items[i].key, key) == 0) {
-            // Allocate a new container in the arena to hold the detached data
             JsonValue *detached = (JsonValue *)arena_alloc(a, sizeof(JsonValue));
             if (detached) *detached = obj->as.list.items[i].value;
             
@@ -1141,7 +1140,6 @@ void json_replace_in_object(Arena *a, JsonValue *obj, const char *key, JsonValue
             return;
         }
     }
-    // If not found, just add it
     json_add(a, obj, key, new_val);
 }
 
