@@ -1003,9 +1003,20 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.last_comment = NULL;
     skip_whitespace(&s);
     if (s.last_comment) {
-        size_t clen = strlen(s.last_comment);
-        root->post_comment = arena_alloc_array(main, char, clen + 1);
-        strcpy(root->post_comment, s.last_comment);
+        if (root->post_comment) {
+            size_t old_len = strlen(root->post_comment);
+            size_t new_len = strlen(s.last_comment);
+            char *merged = arena_alloc_array(main, char, old_len + new_len + 2);
+            memcpy(merged, root->post_comment, old_len);
+            merged[old_len] = '\n';
+            memcpy(merged + old_len + 1, s.last_comment, new_len);
+            merged[old_len + 1 + new_len] = '\0';
+            root->post_comment = merged;
+        } else {
+            size_t clen = strlen(s.last_comment);
+            root->post_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(root->post_comment, s.last_comment);
+        }
     }
 
     if (s.curr != s.end) {
@@ -1412,8 +1423,10 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
     }
 
     if (depth == 0 && v->post_comment) {
-        sb_putc(sb, '\n');
-        sb_append(sb, v->post_comment, strlen(v->post_comment));
+        if (v->type != JSON_OBJECT && v->type != JSON_ARRAY) {
+            sb_putc(sb, '\n');
+            sb_append(sb, v->post_comment, strlen(v->post_comment));
+        }
     }
 }
 
