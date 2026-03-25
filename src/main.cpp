@@ -827,9 +827,20 @@ static void DrawGraphEdges(ImDrawList* dl, GraphNode* node, ImVec2 offset, const
     }
 }
 
-static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse_pos, GraphNode** out_hovered, const ImRect& clip_rect) {
+static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse_pos, GraphNode** out_hovered, const ImRect& clip_rect, JsonValue* highlight_val, double highlight_time, int focus_frames) {
     ImVec2 p_min = ImVec2(offset.x + node->x, offset.y + node->y - 12.0f);
     ImVec2 p_max = ImVec2(p_min.x + node->drawn_width, p_min.y + 24.0f);
+
+    if (node->source_val == highlight_val && node->type == GraphNodeType::Normal) {
+        float fade = ImMax(0.0f, 1.0f - (float)(ImGui::GetTime() - highlight_time) / 1.5f);
+        if (fade > 0.0f) {
+            dl->AddRectFilled(p_min - ImVec2(4,4), p_max + ImVec2(4,4), IM_COL32(255, 255, 0, (int)(100 * fade)), 4.0f);
+        }
+        if (focus_frames > 0) {
+            ImGui::SetScrollFromPosY(p_min.y - ImGui::GetWindowPos().y, 0.5f);
+            ImGui::SetScrollFromPosX(p_min.x - ImGui::GetWindowPos().x, 0.5f);
+        }
+    }
 
     if (clip_rect.Overlaps(ImRect(p_min, p_max))) {
         bool hovered = mouse_pos.x >= p_min.x && mouse_pos.x <= p_max.x && mouse_pos.y >= p_min.y && mouse_pos.y <= p_max.y;
@@ -850,7 +861,7 @@ static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec
     }
 
     for (auto child : node->children) {
-        DrawGraphNodes(dl, child, offset, mouse_pos, out_hovered, clip_rect);
+        DrawGraphNodes(dl, child, offset, mouse_pos, out_hovered, clip_rect, highlight_val, highlight_time, focus_frames);
     }
 }
 
@@ -1151,6 +1162,10 @@ int main(int /*argc*/, char** /*argv*/) {
     std::atomic<LargeTextFile*> doc_ready{nullptr};
     std::thread doc_thread;
 
+    enum class ActiveView { Text, Tree, Graph };
+    ActiveView active_view = ActiveView::Text;
+    bool force_graph_tab = false;
+
     bool show_search_bar = false;
     char search_buf[256] = "";
     char replace_buf[256] = "";
@@ -1175,6 +1190,56 @@ int main(int /*argc*/, char** /*argv*/) {
         highlight_line = line;
         highlight_time = ImGui::GetTime();
         force_text_tab = true;
+    };
+
+    auto JumpToMatch = [&](size_t offset) {
+        if (active_view == ActiveView::Text) {
+            JumpToLine(doc->GetLineFromOffset(offset));
+        } else {
+            std::vector<JsonValue*> current_path;
+            std::vector<JsonValue*> best_path;
+            std::function<void(JsonValue*)> find_closest = [&](JsonValue* val) {
+                if (!val) return;
+                current_path.push_back(val);
+                best_path = current_path;
+
+                if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
+                    JsonValue* best_child = nullptr;
+                    size_t best_dist = (size_t)-1;
+                    for (size_t i = 0; i < val->as.list.count; ++i) {
+                        JsonValue* child = &val->as.list.items[i].value;
+                        size_t dist = (offset > child->offset) ? (offset - child->offset) : (child->offset - offset);
+                        if (dist < best_dist) {
+                            best_dist = dist;
+                            best_child = child;
+                        }
+                    }
+                    if (best_child) find_closest(best_child);
+                }
+                current_path.pop_back();
+            };
+            
+            if (doc->root_json) find_closest(doc->root_json);
+
+            if (!best_path.empty()) {
+                tree_focus_path = best_path;
+                tree_highlight_val = best_path.back();
+                tree_highlight_time = ImGui::GetTime();
+                tree_focus_frames = 3;
+                
+                if (active_view == ActiveView::Tree) {
+                    force_tree_tab = true;
+                } else if (active_view == ActiveView::Graph) {
+                    force_graph_tab = true;
+                    for (size_t i = 0; i < best_path.size() - 1; ++i)
+                        if (best_path[i]->type == JSON_OBJECT || best_path[i]->type == JSON_ARRAY)
+                            for (size_t j = 0; j < best_path[i]->as.list.count; ++j)
+                                if (&best_path[i]->as.list.items[j].value == best_path[i+1])
+                                    doc->graph_pagination[best_path[i]] = (j / doc->pagination_size) * doc->pagination_size;
+                    doc->graph_dirty = true;
+                }
+            } else JumpToLine(doc->GetLineFromOffset(offset));
+        }
     };
 
     auto LoadFile = [&](std::string path) {
@@ -1556,12 +1621,12 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (ImGui::GetIO().KeyShift) {
                         if (!search_results.empty()) {
                             search_active_idx = (search_active_idx > 0) ? search_active_idx - 1 : (int)search_results.size() - 1;
-                            JumpToLine(doc->GetLineFromOffset(search_results[search_active_idx]));
+                            JumpToMatch(search_results[search_active_idx]);
                         }
                     } else {
                         if (!search_results.empty()) {
                             search_active_idx = (search_active_idx < (int)search_results.size() - 1) ? search_active_idx + 1 : 0;
-                            JumpToLine(doc->GetLineFromOffset(search_results[search_active_idx]));
+                            JumpToMatch(search_results[search_active_idx]);
                         }
                     }
                 }
@@ -1577,12 +1642,12 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui::SameLine();
             if (ImGui::Button("< Prev") && !search_results.empty()) {
                 search_active_idx = (search_active_idx > 0) ? search_active_idx - 1 : (int)search_results.size() - 1;
-                JumpToLine(doc->GetLineFromOffset(search_results[search_active_idx]));
+                JumpToMatch(search_results[search_active_idx]);
             }
             ImGui::SameLine();
             if (ImGui::Button("Next >") && !search_results.empty()) {
                 search_active_idx = (search_active_idx < (int)search_results.size() - 1) ? search_active_idx + 1 : 0;
-                JumpToLine(doc->GetLineFromOffset(search_results[search_active_idx]));
+                JumpToMatch(search_results[search_active_idx]);
             }
             ImGui::SameLine();
             if (ImGui::Button("X Close")) {
@@ -1636,7 +1701,7 @@ int main(int /*argc*/, char** /*argv*/) {
             else if (search_active_idx < 0) search_active_idx = 0;
             
             if (search_active_idx >= 0 && doc->line_offsets.size() > 0) {
-                JumpToLine(doc->GetLineFromOffset(search_results[search_active_idx]));
+                JumpToMatch(search_results[search_active_idx]);
             }
             search_dirty = false;
         }
@@ -1644,6 +1709,7 @@ int main(int /*argc*/, char** /*argv*/) {
         if (ImGui::BeginTabBar("Views")) {
             ImGuiTabItemFlags tree_tab_flags = force_tree_tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (ImGui::BeginTabItem("Tree View", nullptr, tree_tab_flags)) {
+                active_view = ActiveView::Tree;
                 force_tree_tab = false;
                 ImGui::BeginChild("TreeChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 if (doc_loading || doc_saving || doc_formatting) {
@@ -1675,7 +1741,10 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
             }
             
-            if (ImGui::BeginTabItem("Graph View")) {
+            ImGuiTabItemFlags graph_tab_flags = force_graph_tab ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem("Graph View", nullptr, graph_tab_flags)) {
+                active_view = ActiveView::Graph;
+                force_graph_tab = false;
                 ImGui::BeginChild("GraphViewChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
                 if (doc_loading || doc_saving || doc_formatting) {
                     const char* msg = doc_loading ? "Loading and parsing JSON... Please wait." : 
@@ -1709,7 +1778,7 @@ int main(int /*argc*/, char** /*argv*/) {
                         ImVec2 win_size = ImGui::GetWindowSize();
                         ImRect clip_rect(win_pos, ImVec2(win_pos.x + win_size.x, win_pos.y + win_size.y));
                         DrawGraphEdges(dl, doc->graph_root, offset, clip_rect);
-                        DrawGraphNodes(dl, doc->graph_root, offset, mouse_pos, &hovered_node, clip_rect);
+                        DrawGraphNodes(dl, doc->graph_root, offset, mouse_pos, &hovered_node, clip_rect, tree_highlight_val, tree_highlight_time, tree_focus_frames);
                     }
                     
                     if (hovered_node) {
@@ -1744,12 +1813,18 @@ int main(int /*argc*/, char** /*argv*/) {
                 } else {
                     ImGui::Text("No valid JSON loaded.");
                 }
+                if (tree_focus_frames > 0) {
+                    tree_focus_frames--;
+                } else {
+                    tree_focus_path.clear();
+                }
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
 
             ImGuiTabItemFlags text_tab_flags = force_text_tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (ImGui::BeginTabItem("Text View", nullptr, text_tab_flags)) {
+                active_view = ActiveView::Text;
                 force_text_tab = false;
                 ImGui::BeginChild("TextChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 // If the DOM was edited, trigger the text regeneration in a background thread
