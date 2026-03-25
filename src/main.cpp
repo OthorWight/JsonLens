@@ -12,6 +12,7 @@
 #include <atomic>
 #include <algorithm>
 #include <map>
+#include <functional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -834,7 +835,7 @@ static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec
     if (node->source_val == highlight_val && node->type == GraphNodeType::Normal) {
         float fade = ImMax(0.0f, 1.0f - (float)(ImGui::GetTime() - highlight_time) / 1.5f);
         if (fade > 0.0f) {
-            dl->AddRectFilled(p_min - ImVec2(4,4), p_max + ImVec2(4,4), IM_COL32(255, 255, 0, (int)(100 * fade)), 4.0f);
+            dl->AddRectFilled(ImVec2(p_min.x - 4.0f, p_min.y - 4.0f), ImVec2(p_max.x + 4.0f, p_max.y + 4.0f), IM_COL32(255, 255, 0, (int)(100 * fade)), 4.0f);
         }
         if (focus_frames > 0) {
             ImGui::SetScrollFromPosY(p_min.y - ImGui::GetWindowPos().y, 0.5f);
