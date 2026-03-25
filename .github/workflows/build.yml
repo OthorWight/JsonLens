@@ -57,6 +57,7 @@ jobs:
             mingw-w64-ucrt-x86_64-SDL2
             
       - name: Fetch ImGui
+        shell: bash
         run: bash ./setup_imgui.sh
 
       - name: Build

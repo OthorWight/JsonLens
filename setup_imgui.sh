@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 mkdir -p third_party
 echo "Cloning Dear ImGui..."
