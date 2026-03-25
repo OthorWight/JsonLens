@@ -1263,6 +1263,14 @@ int main(int /*argc*/, char** /*argv*/) {
         ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
         ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
 
+        // Ensure perfect integer line heights to prevent floating point accumulation drift when scrolling massive virtualized and unvirtualized lists
+        float font_size = ImGui::GetFontSize();
+        float exact_frame_padding_y = std::round(style.FramePadding.y);
+        float exact_line_height = std::max(1.0f, std::round(font_size + exact_frame_padding_y * 2.0f + style.ItemSpacing.y));
+        float exact_item_spacing_y = exact_line_height - font_size - exact_frame_padding_y * 2.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(style.FramePadding.x, exact_frame_padding_y));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, exact_item_spacing_y));
+
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Open...", "Ctrl+O")) {
@@ -1707,19 +1715,19 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (doc->data) {
                         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Ensure monospace if loaded
                         
+                        float exact_item_height = font_size + exact_item_spacing_y;
                         float char_width = ImGui::CalcTextSize("A").x;
                         ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
                         
                         auto GetOffsetFromMouse = [&]() -> size_t {
                             if (doc->line_offsets.empty()) return 0;
                             
-                            double item_height = std::floor((double)ImGui::GetTextLineHeightWithSpacing());
                             double scroll_y = (double)ImGui::GetScrollY();
                             double window_y = (double)ImGui::GetWindowPos().y;
                             double padding_y = (double)ImGui::GetStyle().WindowPadding.y;
                             
                             double local_mouse_y = (double)ImGui::GetMousePos().y - window_y - padding_y + scroll_y;
-                            int raw_line_idx = (int)(local_mouse_y / item_height);
+                            int raw_line_idx = (int)(local_mouse_y / (double)exact_item_height);
                             
                             if (raw_line_idx < 0) raw_line_idx = 0;
                             size_t line_idx = (size_t)raw_line_idx;
@@ -1727,10 +1735,31 @@ int main(int /*argc*/, char** /*argv*/) {
                             size_t line_start = doc->line_offsets[line_idx];
                             size_t line_end = (line_idx + 1 < doc->line_offsets.size()) ? doc->line_offsets[line_idx + 1] : doc->size;
                             if (line_end > line_start && doc->data[line_end - 1] == '\n') line_end--;
+                            if (line_end > line_start && doc->data[line_end - 1] == '\r') line_end--;
                             
                             float local_mouse_x = ImGui::GetMousePos().x - text_start_pos.x;
-                            size_t char_idx = local_mouse_x > 0 ? (size_t)(local_mouse_x / char_width + 0.5f) : 0;
-                            return std::min(line_start + char_idx, line_end);
+                            if (local_mouse_x <= 0.0f) return line_start;
+                            
+                            const char* s = doc->data + line_start;
+                            const char* end = doc->data + line_end;
+                            float current_x = 0.0f;
+                            
+                            ImFont* font = ImGui::GetFont();
+                            const float scale = font_size / font->FontSize;
+                            
+                            while (s < end) {
+                                unsigned int c = (unsigned int)(unsigned char)*s;
+                                int bytes = 1;
+                                if (c >= 0x80) bytes = ImTextCharFromUtf8(&c, s, end);
+                                
+                                if (c != '\r') {
+                                    float c_width = font->GetCharAdvance((ImWchar)c) * scale;
+                                    if (current_x + c_width * 0.5f > local_mouse_x) break;
+                                    current_x += c_width;
+                                }
+                                s += bytes;
+                            }
+                            return (size_t)(s - doc->data);
                         };
 
                         if (ImGui::IsWindowHovered()) {
@@ -1752,9 +1781,8 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
 
                         if (scroll_to_line >= 0 && scroll_to_line_frames > 0) {
-                            double item_height = std::floor((double)ImGui::GetTextLineHeightWithSpacing());
-                            double target_y = (double)scroll_to_line * item_height;
-                            ImGui::SetScrollY((float)(target_y - (double)ImGui::GetWindowHeight() * 0.5 + item_height * 0.5));
+                            double target_y = (double)scroll_to_line * (double)exact_item_height;
+                            ImGui::SetScrollY((float)(target_y - (double)ImGui::GetWindowHeight() * 0.5 + (double)exact_item_height * 0.5));
                             scroll_to_line_frames--;
                         } else {
                             scroll_to_line = -1;
@@ -1762,7 +1790,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
                         // Always use read-only virtualized view for massive performance
                         ImGuiListClipper clipper;
-                        clipper.Begin((int)doc->line_offsets.size());
+                        clipper.Begin((int)doc->line_offsets.size(), exact_item_height);
                         while (clipper.Step()) {
                             for (size_t i = (size_t)clipper.DisplayStart; i < (size_t)clipper.DisplayEnd; i++) {
                                 size_t start = doc->line_offsets[i];
@@ -1837,6 +1865,7 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui::EndTabBar();
         }
 
+        ImGui::PopStyleVar(2);
         ImGui::End(); // End Main
 
         // Rendering
