@@ -19,10 +19,8 @@
 #include <commdlg.h>
 #endif
 
-// Include the custom C JSON Parser (implemented and compiled via arena_json.c)
 #include "arena_json.h"
 
-// Helper to compute memory used across all chunks in a custom Arena
 size_t GetArenaMemoryUsage(const Arena* a) {
     size_t total = 0;
     ArenaRegion* curr = a->begin;
@@ -33,7 +31,6 @@ size_t GetArenaMemoryUsage(const Arena* a) {
     return total;
 }
 
-// Helper to format time dynamically
 std::string FormatTime(double ms) {
     char buf[64];
     if (ms >= 1000.0) {
@@ -48,7 +45,6 @@ std::string FormatTime(double ms) {
     return std::string(buf);
 }
 
-// Helper to format memory size dynamically
 std::string FormatMemory(size_t bytes) {
     char buf[64];
     if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
@@ -135,7 +131,6 @@ void JsonInsertAtIndex(Arena* a, JsonValue* parent, size_t index, const JsonNode
     parent->as.list.count = old_count + 1;
 }
 
-// Minimal cross-platform file dialog using native system calls
 std::string ShowOpenFileDialog(const std::string& default_dir = "") {
 #ifdef _WIN32
     char filename[MAX_PATH] = {0};
@@ -175,7 +170,6 @@ std::string ShowOpenFileDialog(const std::string& default_dir = "") {
     return "";
 }
 
-// Minimal cross-platform save dialog using native system calls
 std::string ShowSaveFileDialog() {
 #ifdef _WIN32
     char filename[MAX_PATH] = {0};
@@ -899,15 +893,12 @@ static void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec
     }
 }
 
-// Recursive UI for editing JSON trees
 int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time) {
     // Action Flags: 1 = Modified, 2 = Remove Requested
     int action = 0;
     JsonValue* val = &node->value;
     if (!val) return false;
 
-    // Use index-based ID so tree node open/close state is preserved across Undo/Redo deep clones
-    // and doesn't lose keyboard focus or collapse when renaming keys.
     if (node_index >= 0) {
         current_path.push_back((size_t)node_index);
         ImGui::PushID(node_index);
@@ -918,7 +909,6 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
     bool in_focus_path = false;
     bool is_focus_target = false;
     
-    // The root node (node_index == -1) is passed as a local dummy copy, so we must compare against the true root pointer
     JsonValue* actual_val = (node_index == -1) ? doc->root_json : val;
     
     if (!focus_path.empty() && actual_val != nullptr) {
@@ -938,7 +928,6 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         }
     };
 
-    // Inline Editor for Keys (Only show if it's an object member, omit for array elements)
     if (node->key != nullptr) {
         char key_buf[256];
         strncpy(key_buf, node->key, sizeof(key_buf) - 1);
@@ -1173,7 +1162,6 @@ int main(int /*argc*/, char** /*argv*/) {
 
     ImGui::StyleColorsDark();
     
-    // Tweak styles to make menus and popups easier to distinguish without adding crazy colors
     ImGuiStyle& style = ImGui::GetStyle();
     style.Colors[ImGuiCol_PopupBg]   = ImVec4(0.15f, 0.15f, 0.15f, 0.98f); // Lighter gray background for dropdowns
     style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.00f); // Slightly lighter menu bar
@@ -1392,12 +1380,10 @@ int main(int /*argc*/, char** /*argv*/) {
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        // Setup a fullscreen dockspace/window
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos);
         ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
         ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
 
-        // Ensure perfect integer line heights to prevent floating point accumulation drift when scrolling massive virtualized and unvirtualized lists
         float font_size = ImGui::GetFontSize();
         float exact_frame_padding_y = std::round(style.FramePadding.y);
         float exact_line_height = std::max(1.0f, std::round(font_size + exact_frame_padding_y * 2.0f + style.ItemSpacing.y));
@@ -1525,7 +1511,6 @@ int main(int /*argc*/, char** /*argv*/) {
                 ImGui::EndMenu();
             }
             
-            // Push the Stats menu to the far right
             float stats_width = ImGui::CalcTextSize("Stats").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
             float avail_width = ImGui::GetContentRegionAvail().x;
             if (avail_width > stats_width) {
@@ -1552,7 +1537,6 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui::EndMenuBar();
         }
 
-        // Global keyboard shortcuts
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
             LoadFile(ShowOpenFileDialog(settings.last_folder));
         }
@@ -1661,7 +1645,6 @@ int main(int /*argc*/, char** /*argv*/) {
             if (focus_search) ImGui::SetKeyboardFocusHere();
             if (ImGui::InputText("##search", search_buf, sizeof(search_buf))) search_dirty = true;
             
-            // Allow hitting Enter/Shift+Enter to navigate results while typing
             if (ImGui::IsItemFocused()) {
                 if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
                     if (ImGui::GetIO().KeyShift) {
@@ -1970,7 +1953,6 @@ int main(int /*argc*/, char** /*argv*/) {
                             scroll_to_line = -1;
                         }
 
-                        // Always use read-only virtualized view for massive performance
                         ImGuiListClipper clipper;
                         clipper.Begin((int)doc->line_offsets.size(), exact_item_height);
                         while (clipper.Step()) {
@@ -2050,7 +2032,6 @@ int main(int /*argc*/, char** /*argv*/) {
         ImGui::PopStyleVar(2);
         ImGui::End(); // End Main
 
-        // Rendering
         ImGui::Render();
         glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
         glClearColor(0.1f, 0.1f, 0.1f, 1.00f);
