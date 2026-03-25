@@ -109,6 +109,8 @@ typedef struct JsonValue {
     } as;
     uint64_t type : 4;
     uint64_t offset : 60;
+    char *pre_comment;
+    char *post_comment;
 } JsonValue;
 
 struct JsonNode {
@@ -325,6 +327,7 @@ typedef struct {
     Arena *scratch; 
     int flags;
     KeyCacheEntry *key_cache;
+    char *last_comment;
 } ParseState;
 
 typedef struct NodeBlock NodeBlock;
@@ -355,6 +358,9 @@ static void advance(ParseState *s, int n) { s->curr += n; }
 static const unsigned char ws_lut[256] = { [' '] = 1, ['\n'] = 1, ['\r'] = 1, ['\t'] = 1 };
 
 static void skip_whitespace(ParseState *s) {
+    char *comments = NULL;
+    size_t comm_cap = 0, comm_len = 0;
+
     while (1) {
         const char *p = s->curr;
         const char *end = s->end;
@@ -387,21 +393,56 @@ static void skip_whitespace(ParseState *s) {
 
         if (s->flags & JSON_PARSE_ALLOW_COMMENTS) {
             if (p + 1 < end && p[0] == '/') {
+                const char *comm_start = p;
                 if (p[1] == '/') {
                     p += 2;
                     while (p < end && *p != '\n') p++;
-                    s->curr = p;
-                    continue;
                 } else if (p[1] == '*') {
                     p += 2;
                     while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) p++;
                     if (p + 1 < end) p += 2;
-                    s->curr = p;
-                    continue;
+                } else {
+                    break;
                 }
+
+                size_t len = p - comm_start;
+                if (!comments) {
+                    comm_cap = len + 128;
+                    comments = arena_alloc_array(s->scratch, char, comm_cap);
+                    memcpy(comments, comm_start, len);
+                    comm_len = len;
+                } else {
+                    if (comm_len + len + 2 > comm_cap) {
+                        size_t new_cap = comm_cap + len + 128;
+                        char *new_comm = arena_alloc_array(s->scratch, char, new_cap);
+                        memcpy(new_comm, comments, comm_len);
+                        comments = new_comm;
+                        comm_cap = new_cap;
+                    }
+                    comments[comm_len++] = '\n';
+                    memcpy(comments + comm_len, comm_start, len);
+                    comm_len += len;
+                }
+                comments[comm_len] = '\0';
+                s->curr = p;
+                continue;
             }
         }
         break;
+    }
+
+    if (comments) {
+        if (s->last_comment) {
+            size_t exist_len = strlen(s->last_comment);
+            char *merged = arena_alloc_array(s->scratch, char, exist_len + comm_len + 2);
+            memcpy(merged, s->last_comment, exist_len);
+            merged[exist_len] = '\n';
+            memcpy(merged + exist_len + 1, comments, comm_len);
+            merged[exist_len + 1 + comm_len] = '\0';
+            s->last_comment = merged;
+        } else {
+            s->last_comment = comments;
+        }
     }
 }
 
@@ -410,6 +451,8 @@ static JsonValue *make_value(Arena *a, JsonType type) {
     if (v) {
         v->type = type;
         v->offset = 0;
+        v->pre_comment = NULL;
+        v->post_comment = NULL;
         if (type == JSON_ARRAY || type == JSON_OBJECT) {
             v->as.list.items = NULL;
             v->as.list.count = 0;
@@ -652,12 +695,19 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
     if (depth > MAX_JSON_DEPTH) { set_error(s, "Max JSON depth"); return false; }
 
     advance(s, 1); 
+    s->last_comment = NULL;
     skip_whitespace(s);
     
     if (s->curr < s->end && *s->curr == ']') {
         advance(s, 1);
         arr->as.list.count = 0;
         arr->as.list.items = NULL;
+        if (s->last_comment) {
+            size_t clen = strlen(s->last_comment);
+            arr->post_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(arr->post_comment, s->last_comment);
+            s->last_comment = NULL;
+        }
         return true;
     }
 
@@ -689,6 +739,7 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
         curr_block->count++;
         total_count++;
 
+        s->last_comment = NULL;
         skip_whitespace(s);
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
         
@@ -699,11 +750,26 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
                 skip_whitespace(s);
                 if (s->curr < s->end && *s->curr == ']') {
                     advance(s, 1);
+                    if (s->last_comment) {
+                        size_t clen = strlen(s->last_comment);
+                        arr->post_comment = arena_alloc_array(main, char, clen + 1);
+                        strcpy(arr->post_comment, s->last_comment);
+                        s->last_comment = NULL;
+                    }
                     break;
                 }
             }
         } 
-        else if (c == ']') { advance(s, 1); break; } 
+        else if (c == ']') { 
+            advance(s, 1); 
+            if (s->last_comment) {
+                size_t clen = strlen(s->last_comment);
+                arr->post_comment = arena_alloc_array(main, char, clen + 1);
+                strcpy(arr->post_comment, s->last_comment);
+                s->last_comment = NULL;
+            }
+            break; 
+        } 
         else { set_error(s, "Expected ',' or ']'"); return false; }
     }
 
@@ -727,12 +793,19 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
     if (depth > MAX_JSON_DEPTH) { set_error(s, "Max JSON depth"); return false; }
 
     advance(s, 1); 
+    s->last_comment = NULL;
     skip_whitespace(s);
 
     if (s->curr < s->end && *s->curr == '}') {
         advance(s, 1);
         obj->as.list.count = 0;
         obj->as.list.items = NULL;
+        if (s->last_comment) {
+            size_t clen = strlen(s->last_comment);
+            obj->post_comment = arena_alloc_array(main, char, clen + 1);
+            strcpy(obj->post_comment, s->last_comment);
+            s->last_comment = NULL;
+        }
         return true;
     }
 
@@ -751,6 +824,9 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
         if (*s->curr != '"') { set_error(s, "Expected key"); return false; }
 
+        char *key_comment = s->last_comment;
+        s->last_comment = NULL;
+
         if (curr_block->count == BLOCK_CAPACITY) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
             if (!next_block) return false;
@@ -768,11 +844,27 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         if (s->curr >= s->end || *s->curr != ':') { set_error(s, "Expected ':'"); return false; }
         advance(s, 1); 
 
+        if (key_comment) {
+            if (s->last_comment) {
+                size_t kl = strlen(key_comment);
+                size_t sl = strlen(s->last_comment);
+                char *merged = arena_alloc_array(s->scratch, char, kl + sl + 2);
+                memcpy(merged, key_comment, kl);
+                merged[kl] = '\n';
+                memcpy(merged + kl + 1, s->last_comment, sl);
+                merged[kl + 1 + sl] = '\0';
+                s->last_comment = merged;
+            } else {
+                s->last_comment = key_comment;
+            }
+        }
+
         if (!parse_element(main, s, &node->value, depth + 1)) return false;
         
         curr_block->count++;
         total_count++;
 
+        s->last_comment = NULL;
         skip_whitespace(s);
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
 
@@ -783,11 +875,26 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
                 skip_whitespace(s);
                 if (s->curr < s->end && *s->curr == '}') {
                     advance(s, 1);
+                    if (s->last_comment) {
+                        size_t clen = strlen(s->last_comment);
+                        obj->post_comment = arena_alloc_array(main, char, clen + 1);
+                        strcpy(obj->post_comment, s->last_comment);
+                        s->last_comment = NULL;
+                    }
                     break;
                 }
             }
         } 
-        else if (c == '}') { advance(s, 1); break; } 
+        else if (c == '}') { 
+            advance(s, 1); 
+            if (s->last_comment) {
+                size_t clen = strlen(s->last_comment);
+                obj->post_comment = arena_alloc_array(main, char, clen + 1);
+                strcpy(obj->post_comment, s->last_comment);
+                s->last_comment = NULL;
+            }
+            break; 
+        } 
         else { set_error(s, "Expected ',' or '}'"); return false; }
     }
 
@@ -859,6 +966,17 @@ static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int de
     skip_whitespace(s);
     if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
     out_val->offset = s->curr - s->start;
+
+    if (s->last_comment) {
+        size_t clen = strlen(s->last_comment);
+        out_val->pre_comment = arena_alloc_array(main, char, clen + 1);
+        strcpy(out_val->pre_comment, s->last_comment);
+        s->last_comment = NULL;
+    } else {
+        out_val->pre_comment = NULL;
+    }
+    out_val->post_comment = NULL;
+
     unsigned char c = (unsigned char)*s->curr;
     parse_func func = dispatch_table[c];
     if (func) return func(main, s, out_val, depth);
@@ -874,6 +992,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.start = input; s.curr = input; s.end = input + len;
     s.err = err; s.scratch = scratch;
     s.flags = flags;
+    s.last_comment = NULL;
     s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * KEY_CACHE_CAPACITY);
 
     JsonValue *root = arena_alloc_struct(main, JsonValue);
@@ -881,7 +1000,14 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
 
     if (!parse_element(main, &s, root, 0)) return NULL;
     
+    s.last_comment = NULL;
     skip_whitespace(&s);
+    if (s.last_comment) {
+        size_t clen = strlen(s.last_comment);
+        root->post_comment = arena_alloc_array(main, char, clen + 1);
+        strcpy(root->post_comment, s.last_comment);
+    }
+
     if (s.curr != s.end) {
         if (err) set_error(&s, "Garbage after JSON");
         return NULL;
@@ -1026,6 +1152,13 @@ JsonValue* json_clone(Arena *dest_arena, JsonValue *src) {
     if (!src) return NULL;
     JsonValue *new_val = arena_alloc_struct(dest_arena, JsonValue);
     new_val->type = src->type;
+    new_val->offset = src->offset;
+
+    new_val->pre_comment = src->pre_comment ? arena_alloc_array(dest_arena, char, strlen(src->pre_comment) + 1) : NULL;
+    if (new_val->pre_comment) strcpy(new_val->pre_comment, src->pre_comment);
+    
+    new_val->post_comment = src->post_comment ? arena_alloc_array(dest_arena, char, strlen(src->post_comment) + 1) : NULL;
+    if (new_val->post_comment) strcpy(new_val->post_comment, src->post_comment);
 
     switch (src->type) {
         case JSON_NUMBER: new_val->as.number = src->as.number; break;
@@ -1116,6 +1249,18 @@ static void w_escaped_string(StrBuilder *sb, const char *s) {
 
 static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pretty, bool use_tabs, int indent_step) {
     if (!v) return;
+
+    if (v->pre_comment) {
+        sb_append(sb, v->pre_comment, strlen(v->pre_comment));
+        sb_putc(sb, '\n');
+        if (pretty && depth > 0) {
+            for (int j = 0; j < depth; j++) {
+                if (use_tabs) sb_putc(sb, '\t');
+                else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+            }
+        }
+    }
+
     switch (v->type) {
         case JSON_NULL: sb_append(sb, "null", 4); break;
         case JSON_BOOL: 
@@ -1149,18 +1294,49 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         case JSON_STRING: w_escaped_string(sb, v->as.string); break;
         case JSON_ARRAY: {
             sb_putc(sb, '[');
-            if (v->as.list.count > 0) {
-                if (pretty) sb_putc(sb, '\n');
+            if (v->as.list.count > 0 || v->post_comment) {
                 for (size_t i = 0; i < v->as.list.count; i++) {
-                    if (pretty) for (int j = 0; j < depth + 1; j++) {
-                        if (use_tabs) sb_putc(sb, '\t');
-                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    JsonValue *child = &v->as.list.items[i].value;
+                    
+                    if (child->pre_comment) {
+                        if (pretty) {
+                            sb_putc(sb, '\n');
+                            for (int j = 0; j < depth + 1; j++) {
+                                if (use_tabs) sb_putc(sb, '\t');
+                                else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                            }
+                        }
+                        sb_append(sb, child->pre_comment, strlen(child->pre_comment));
+                        if (!pretty) sb_putc(sb, '\n');
                     }
-                    json_write_internal(&v->as.list.items[i].value, sb, depth + 1, pretty, use_tabs, indent_step);
+                    
+                    if (pretty) {
+                        sb_putc(sb, '\n');
+                        for (int j = 0; j < depth + 1; j++) {
+                            if (use_tabs) sb_putc(sb, '\t');
+                            else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                        }
+                    }
+                    
+                    char *temp = child->pre_comment;
+                    child->pre_comment = NULL;
+                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step);
+                    child->pre_comment = temp;
+                    
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
-                        if (pretty) sb_putc(sb, '\n');
                     }
+                }
+                if (v->post_comment) {
+                    if (pretty) {
+                        sb_putc(sb, '\n');
+                        for (int j = 0; j < depth + 1; j++) {
+                            if (use_tabs) sb_putc(sb, '\t');
+                            else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                        }
+                    }
+                    sb_append(sb, v->post_comment, strlen(v->post_comment));
+                    if (!pretty) sb_putc(sb, '\n');
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
@@ -1175,20 +1351,52 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         }
         case JSON_OBJECT: {
             sb_putc(sb, '{');
-            if (v->as.list.count > 0) {
-                if (pretty) sb_putc(sb, '\n');
+            if (v->as.list.count > 0 || v->post_comment) {
                 for (size_t i = 0; i < v->as.list.count; i++) {
-                    if (pretty) for (int j = 0; j < depth + 1; j++) {
-                        if (use_tabs) sb_putc(sb, '\t');
-                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    JsonValue *child = &v->as.list.items[i].value;
+                    
+                    if (child->pre_comment) {
+                        if (pretty) {
+                            sb_putc(sb, '\n');
+                            for (int j = 0; j < depth + 1; j++) {
+                                if (use_tabs) sb_putc(sb, '\t');
+                                else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                            }
+                        }
+                        sb_append(sb, child->pre_comment, strlen(child->pre_comment));
+                        if (!pretty) sb_putc(sb, '\n');
                     }
+                    
+                    if (pretty) {
+                        sb_putc(sb, '\n');
+                        for (int j = 0; j < depth + 1; j++) {
+                            if (use_tabs) sb_putc(sb, '\t');
+                            else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                        }
+                    }
+                    
                     w_escaped_string(sb, v->as.list.items[i].key);
                     sb_append(sb, pretty ? ": " : ":", pretty ? 2 : 1);
-                    json_write_internal(&v->as.list.items[i].value, sb, depth + 1, pretty, use_tabs, indent_step);
+                    
+                    char *temp = child->pre_comment;
+                    child->pre_comment = NULL;
+                    json_write_internal(child, sb, depth + 1, pretty, use_tabs, indent_step);
+                    child->pre_comment = temp;
+                    
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
-                        if (pretty) sb_putc(sb, '\n');
                     }
+                }
+                if (v->post_comment) {
+                    if (pretty) {
+                        sb_putc(sb, '\n');
+                        for (int j = 0; j < depth + 1; j++) {
+                            if (use_tabs) sb_putc(sb, '\t');
+                            else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                        }
+                    }
+                    sb_append(sb, v->post_comment, strlen(v->post_comment));
+                    if (!pretty) sb_putc(sb, '\n');
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
@@ -1201,6 +1409,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
             sb_putc(sb, '}');
             break;
         }
+    }
+
+    if (depth == 0 && v->post_comment) {
+        sb_putc(sb, '\n');
+        sb_append(sb, v->post_comment, strlen(v->post_comment));
     }
 }
 
@@ -1271,6 +1484,7 @@ void json_add(Arena *a, JsonValue *obj, const char *key, JsonValue *val) {
 void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val) {
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
+        str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
         size_t len = strlen(val);
         str_val.as.string = arena_alloc_array(a, char, len + 1);
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
@@ -1279,14 +1493,17 @@ void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val)
 }
 void json_add_number(Arena *a, JsonValue *obj, const char *key, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
+    num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
     json_list_append(a, obj, key, &num_val);
 }
 void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
     JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
+    bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
     json_list_append(a, obj, key, &bool_val);
 }
 void json_add_null(Arena *a, JsonValue *obj, const char *key) {
     JsonValue null_val; null_val.type = JSON_NULL;
+    null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
     json_list_append(a, obj, key, &null_val);
 }
 
@@ -1296,6 +1513,7 @@ void json_append(Arena *a, JsonValue *arr, JsonValue *val) {
 void json_append_string(Arena *a, JsonValue *arr, const char *val) {
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
+        str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
         size_t len = strlen(val);
         str_val.as.string = arena_alloc_array(a, char, len + 1);
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
@@ -1304,14 +1522,17 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
 }
 void json_append_number(Arena *a, JsonValue *arr, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
+    num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
     json_list_append(a, arr, NULL, &num_val);
 }
 void json_append_bool(Arena *a, JsonValue *arr, bool val) {
     JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
+    bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
     json_list_append(a, arr, NULL, &bool_val);
 }
 void json_append_null(Arena *a, JsonValue *arr) {
     JsonValue null_val; null_val.type = JSON_NULL;
+    null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
     json_list_append(a, arr, NULL, &null_val);
 }
 
