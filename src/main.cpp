@@ -890,7 +890,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
     
     if (!focus_path.empty() && actual_val != nullptr) {
         in_focus_path = (std::find(focus_path.begin(), focus_path.end(), actual_val) != focus_path.end());
-        is_focus_target = (actual_val == focus_path.front());
+        is_focus_target = (actual_val == focus_path.back());
     }
 
     auto ApplyFocusTarget = [&]() {
@@ -1056,8 +1056,8 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 bool chunk_has_focus = false;
                 if (in_focus_path && focus_path.size() > 1 && actual_val != nullptr) {
                     auto it = std::find(focus_path.begin(), focus_path.end(), actual_val);
-                    if (it != focus_path.end() && it != focus_path.begin()) {
-                        JsonValue* next_in_path = *(it - 1);
+                    if (it != focus_path.end() && (it + 1) != focus_path.end()) {
+                        JsonValue* next_in_path = *(it + 1);
                         for (size_t i = chunk_start; i < chunk_end; i++) {
                             if (&val->as.list.items[i].value == next_in_path) {
                                 chunk_has_focus = true; break;
@@ -1794,6 +1794,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                         tree_focus_path.push_back(curr->source_val);
                                         curr = curr->parent;
                                     }
+                                    std::reverse(tree_focus_path.begin(), tree_focus_path.end());
                                     tree_highlight_val = hovered_node->source_val;
                                     tree_highlight_time = ImGui::GetTime();
                                     force_tree_tab = true;
