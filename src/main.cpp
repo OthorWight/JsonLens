@@ -958,7 +958,8 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         }
         case JSON_NUMBER: {
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::InputDouble("##val", &val->as.number)) {
+            const char* format = (val->as.number == (int64_t)val->as.number) ? "%.0f" : "%.17g";
+            if (ImGui::InputDouble("##val", &val->as.number, 0.0, 0.0, format)) {
                 action |= 1;
             }
             if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
