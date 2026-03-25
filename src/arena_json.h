@@ -124,7 +124,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
 JsonValue *json_get(JsonValue *obj, const char *key);
 JsonValue *json_at(JsonValue *arr, int index);
 void json_print(JsonValue *v, int indent);
-char *json_to_string(Arena *a, JsonValue *v, bool pretty);
+char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step);
 
 /* --- Iteration Macros --- */
 #define json_array_foreach(node, arr) \
@@ -1074,7 +1074,7 @@ static void w_escaped_string(StrBuilder *sb, const char *s) {
     sb_putc(sb, '"');
 }
 
-static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool pretty) {
+static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pretty, bool use_tabs, int indent_step) {
     if (!v) return;
     switch (v->type) {
         case JSON_NULL: sb_append(sb, "null", 4); break;
@@ -1112,8 +1112,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool p
             if (v->as.list.count > 0) {
                 if (pretty) sb_putc(sb, '\n');
                 for (size_t i = 0; i < v->as.list.count; i++) {
-                    if (pretty) for (int j = 0; j < indent + 2; j++) sb_putc(sb, ' ');
-                    json_write_internal(&v->as.list.items[i].value, sb, indent + (pretty ? 2 : 0), pretty);
+                    if (pretty) for (int j = 0; j < depth + 1; j++) {
+                        if (use_tabs) sb_putc(sb, '\t');
+                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    }
+                    json_write_internal(&v->as.list.items[i].value, sb, depth + 1, pretty, use_tabs, indent_step);
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                         if (pretty) sb_putc(sb, '\n');
@@ -1121,7 +1124,10 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool p
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
-                    for (int i = 0; i < indent; i++) sb_putc(sb, ' ');
+                    for (int j = 0; j < depth; j++) {
+                        if (use_tabs) sb_putc(sb, '\t');
+                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    }
                 }
             }
             sb_putc(sb, ']');
@@ -1132,10 +1138,13 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool p
             if (v->as.list.count > 0) {
                 if (pretty) sb_putc(sb, '\n');
                 for (size_t i = 0; i < v->as.list.count; i++) {
-                    if (pretty) for (int j = 0; j < indent + 2; j++) sb_putc(sb, ' ');
+                    if (pretty) for (int j = 0; j < depth + 1; j++) {
+                        if (use_tabs) sb_putc(sb, '\t');
+                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    }
                     w_escaped_string(sb, v->as.list.items[i].key);
                     sb_append(sb, pretty ? ": " : ":", pretty ? 2 : 1);
-                    json_write_internal(&v->as.list.items[i].value, sb, indent + (pretty ? 2 : 0), pretty);
+                    json_write_internal(&v->as.list.items[i].value, sb, depth + 1, pretty, use_tabs, indent_step);
                     if (i + 1 < v->as.list.count) {
                         sb_putc(sb, ',');
                         if (pretty) sb_putc(sb, '\n');
@@ -1143,7 +1152,10 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool p
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
-                    for (int i = 0; i < indent; i++) sb_putc(sb, ' ');
+                    for (int j = 0; j < depth; j++) {
+                        if (use_tabs) sb_putc(sb, '\t');
+                        else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                    }
                 }
             }
             sb_putc(sb, '}');
@@ -1152,11 +1164,11 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int indent, bool p
     }
 }
 
-char *json_to_string(Arena *a, JsonValue *v, bool pretty) {
+char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step) {
     if (!a || !v) return NULL;
     StrBuilder sb;
     sb_init(&sb);
-    json_write_internal(v, &sb, 0, pretty);
+    json_write_internal(v, &sb, 0, pretty, use_tabs, indent_step);
     char *result = arena_alloc_array(a, char, sb.len + 1);
     if (result && sb.buf) {
         memcpy(result, sb.buf, sb.len);

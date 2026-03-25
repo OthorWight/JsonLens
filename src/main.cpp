@@ -212,6 +212,10 @@ struct AppSettings {
     std::vector<std::string> recent_files;
     std::string last_folder;
     int graph_goto_target = 0; // 0 = Text View, 1 = Tree View
+    bool allow_comments = true;
+    bool use_tabs = false;
+    int indent_size = 2;
+    int pagination_size = 2000;
 
     std::string GetSettingsPath() {
         char* pref_path = SDL_GetPrefPath("JsonLens", "JsonLens");
@@ -250,6 +254,10 @@ struct AppSettings {
             const char* folder = json_get_string(root, "last_folder", nullptr);
             if (folder) last_folder = folder;
             graph_goto_target = (int)json_get_number(root, "graph_goto_target", 0.0);
+            allow_comments = json_get_bool(root, "allow_comments", true);
+            use_tabs = json_get_bool(root, "use_tabs", false);
+            indent_size = (int)json_get_number(root, "indent_size", 2.0);
+            pagination_size = (int)json_get_number(root, "pagination_size", 2000.0);
         }
         arena_free(&arena);
         arena_free(&scratch);
@@ -272,8 +280,12 @@ struct AppSettings {
         if (!last_folder.empty()) 
             json_add_string(&arena, root, "last_folder", last_folder.c_str());
         json_add_number(&arena, root, "graph_goto_target", (double)graph_goto_target);
+        json_add_bool(&arena, root, "allow_comments", allow_comments);
+        json_add_bool(&arena, root, "use_tabs", use_tabs);
+        json_add_number(&arena, root, "indent_size", (double)indent_size);
+        json_add_number(&arena, root, "pagination_size", (double)pagination_size);
 
-        char* str = json_to_string(&arena, root, true);
+        char* str = json_to_string(&arena, root, true, false, 4);
         if (str) {
             FILE* f = fopen(path.c_str(), "wb");
             if (f) {
@@ -325,6 +337,8 @@ struct LargeTextFile {
     double format_time_ms = 0;
     size_t parse_memory_bytes = 0;
     
+    int pagination_size = 2000;
+
     Arena main_arena;
     Arena scratch_arena;
     JsonValue* root_json = nullptr;
@@ -402,7 +416,7 @@ struct LargeTextFile {
         return total;
     }
 
-    void Load(const char* filepath) {
+    void Load(const char* filepath, bool allow_comments) {
         ClearHistory();
         ClearGraph();
         if (data) {
@@ -440,7 +454,8 @@ struct LargeTextFile {
 
         // Parse the JSON using the fast Arena allocator
         Uint64 t2 = SDL_GetPerformanceCounter();
-        root_json = json_parse(&main_arena, &scratch_arena, data, size, JSON_PARSE_ALLOW_COMMENTS, &last_err);
+        int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
+        root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
         Uint64 t3 = SDL_GetPerformanceCounter();
         parse_time_ms = (double)(t3 - t2) * 1000.0 / t_freq;
         
@@ -461,7 +476,7 @@ struct LargeTextFile {
         printf("------------------\n");
     }
 
-    void RebuildTextFromTree() {
+    void RebuildTextFromTree(bool use_tabs, int indent_step) {
         if (!tree_dirty || !root_json) return;
         
         Uint64 t_freq = SDL_GetPerformanceFrequency();
@@ -470,7 +485,7 @@ struct LargeTextFile {
         arena_free(&scratch_arena);
         arena_init(&scratch_arena);
         
-        char* new_text = json_to_string(&scratch_arena, root_json, is_pretty);
+        char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step);
         if (new_text) {
             size_t new_len = strlen(new_text);
             if (new_len >= data_capacity) {
@@ -499,8 +514,8 @@ struct LargeTextFile {
         printf("--------------------\n");
     }
 
-    void SaveToFile(const char* filepath) {
-        RebuildTextFromTree(); // Ensure the text buffer matches the current tree
+    void SaveToFile(const char* filepath, bool use_tabs, int indent_step) {
+        RebuildTextFromTree(use_tabs, indent_step); // Ensure the text buffer matches the current tree
         if (!data) return;
         FILE* f = fopen(filepath, "wb");
         if (!f) return;
@@ -606,7 +621,7 @@ struct LargeTextFile {
         return false;
     }
 
-    void RebuildTreeFromText() {
+    void RebuildTreeFromText(bool allow_comments) {
         Uint64 t_freq = SDL_GetPerformanceFrequency();
         Uint64 t0 = SDL_GetPerformanceCounter();
 
@@ -614,7 +629,8 @@ struct LargeTextFile {
         arena_free(&scratch_arena);
         arena_init(&main_arena);
         arena_init(&scratch_arena);
-        root_json = json_parse(&main_arena, &scratch_arena, data, size, JSON_PARSE_ALLOW_COMMENTS, &last_err);
+        int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
+        root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
         BuildLineOffsets();
         ClearGraph();
         tree_dirty = false;
@@ -739,10 +755,10 @@ static GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::
     if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
         size_t start_idx = doc->graph_pagination[val];
         if (start_idx >= val->as.list.count && val->as.list.count > 0)
-            start_idx = (val->as.list.count - 1) / 2000 * 2000;
+            start_idx = (val->as.list.count - 1) / doc->pagination_size * doc->pagination_size;
 
         size_t remaining = val->as.list.count > start_idx ? val->as.list.count - start_idx : 0;
-        size_t count = remaining > 2000 ? 2000 : remaining;
+        size_t count = remaining > (size_t)doc->pagination_size ? (size_t)doc->pagination_size : remaining;
 
         if (start_idx > 0) {
             GraphNode* prev_node = new GraphNode();
@@ -1018,7 +1034,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         int item_to_remove = -1;
         
         // Paginate massive arrays/objects
-        const size_t chunk_size = 2000;
+        const size_t chunk_size = doc->pagination_size;
         for (size_t chunk_start = 0; chunk_start < val->as.list.count; chunk_start += chunk_size) {
             size_t chunk_end = chunk_start + chunk_size;
             if (chunk_end > val->as.list.count) chunk_end = val->as.list.count;
@@ -1178,9 +1194,12 @@ int main(int /*argc*/, char** /*argv*/) {
             doc_loading = true;
             if (doc_thread.joinable()) doc_thread.join();
             
-            doc_thread = std::thread([path, &doc_ready, &doc_loading]() {
+            bool allow_comments = settings.allow_comments;
+            int pagination_size = settings.pagination_size;
+            doc_thread = std::thread([path, allow_comments, pagination_size, &doc_ready, &doc_loading]() {
                 LargeTextFile* new_doc = new LargeTextFile();
-                new_doc->Load(path.c_str());
+                new_doc->pagination_size = pagination_size;
+                new_doc->Load(path.c_str(), allow_comments);
                 doc_ready = new_doc;
                 doc_loading = false;
             });
@@ -1198,8 +1217,10 @@ int main(int /*argc*/, char** /*argv*/) {
             doc_saving = true;
             if (doc_thread.joinable()) doc_thread.join();
             
-            doc_thread = std::thread([doc, path, &doc_saving]() {
-                doc->SaveToFile(path.c_str());
+            bool use_tabs = settings.use_tabs;
+            int indent_size = settings.indent_size;
+            doc_thread = std::thread([doc, path, use_tabs, indent_size, &doc_saving]() {
+                doc->SaveToFile(path.c_str(), use_tabs, indent_size);
                 doc_saving = false;
             });
         }
@@ -1210,11 +1231,13 @@ int main(int /*argc*/, char** /*argv*/) {
             doc_formatting = true;
             if (doc_thread.joinable()) doc_thread.join();
             
-            doc_thread = std::thread([doc, pretty, &doc_formatting, &search_dirty]() {
+            bool use_tabs = settings.use_tabs;
+            int indent_size = settings.indent_size;
+            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, &doc_formatting, &search_dirty]() {
                 std::string old_text(doc->data, doc->size);
                 doc->is_pretty = pretty;
                 doc->tree_dirty = true;
-                doc->RebuildTextFromTree();
+                doc->RebuildTextFromTree(use_tabs, indent_size);
                 
                 if (doc->data) {
                     std::string new_text(doc->data, doc->size);
@@ -1332,7 +1355,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy All", "Ctrl+Shift+C", false, has_doc)) {
-                    if (doc->tree_dirty) doc->RebuildTextFromTree();
+                    if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size);
                     ImGui::SetClipboardText(doc->data);
                 }
                 ImGui::Separator();
@@ -1364,6 +1387,27 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
                 if (ImGui::RadioButton("Go to Tree View", settings.graph_goto_target == 1)) {
                     settings.graph_goto_target = 1; settings.Save();
+                }
+                ImGui::Separator();
+                
+                ImGui::TextDisabled("Parser");
+                if (ImGui::Checkbox("Allow Comments", &settings.allow_comments)) settings.Save();
+                
+                ImGui::Separator();
+                ImGui::TextDisabled("Formatting");
+                if (ImGui::Checkbox("Use Tabs", &settings.use_tabs)) settings.Save();
+                if (!settings.use_tabs) {
+                    if (ImGui::SliderInt("Indent Size", &settings.indent_size, 1, 8)) settings.Save();
+                }
+                
+                ImGui::Separator();
+                ImGui::TextDisabled("Performance");
+                if (ImGui::SliderInt("Pagination Size", &settings.pagination_size, 100, 10000)) {
+                    settings.Save();
+                    if (doc) {
+                        doc->pagination_size = settings.pagination_size;
+                        doc->graph_dirty = true;
+                    }
                 }
                 ImGui::EndMenu();
             }
@@ -1418,7 +1462,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
         if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
             if (!doc_loading && !doc_saving && !doc_formatting && doc->data) {
-                if (doc->tree_dirty) doc->RebuildTextFromTree();
+                if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size);
                 ImGui::SetClipboardText(doc->data);
             }
         }
@@ -1446,16 +1490,18 @@ int main(int /*argc*/, char** /*argv*/) {
             if (doc->Undo()) {
                 doc->ClearAstHistory();
                 doc_formatting = true;
+                bool allow_comments = settings.allow_comments;
                 if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
             }
         }
         if (can_global_undo && ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Y) || (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
             if (doc->Redo()) {
                 doc->ClearAstHistory();
                 doc_formatting = true;
+                bool allow_comments = settings.allow_comments;
                 if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
             }
         }
 
@@ -1554,16 +1600,18 @@ int main(int /*argc*/, char** /*argv*/) {
                 doc->ReplaceCurrent(search_buf, replace_buf, search_results, search_active_idx);
                 doc->ClearAstHistory();
                 doc_formatting = true;
+                bool allow_comments = settings.allow_comments;
                 if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
             }
             ImGui::SameLine();
             if (ImGui::Button("Replace All") && !search_results.empty() && doc->data) {
                 doc->ReplaceAll(search_buf, replace_buf, search_results);
                 doc->ClearAstHistory();
                 doc_formatting = true;
+                bool allow_comments = settings.allow_comments;
                 if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(); doc_formatting = false; search_dirty = true; });
+                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
             }
 
             ImGui::EndChild();
@@ -1682,8 +1730,8 @@ int main(int /*argc*/, char** /*argv*/) {
                             }
                         } else if (ImGui::IsMouseClicked(0)) {
                             if (hovered_node->type == GraphNodeType::PrevPage) {
-                                if (doc->graph_pagination[hovered_node->source_val] >= 2000)
-                                    doc->graph_pagination[hovered_node->source_val] -= 2000;
+                                if (doc->graph_pagination[hovered_node->source_val] >= (size_t)doc->pagination_size)
+                                    doc->graph_pagination[hovered_node->source_val] -= doc->pagination_size;
                                 else doc->graph_pagination[hovered_node->source_val] = 0;
                             } else if (hovered_node->type == GraphNodeType::NextPage) {
                                 doc->graph_pagination[hovered_node->source_val] += hovered_node->page_step;
@@ -1706,9 +1754,11 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (doc->tree_dirty && !doc_loading && !doc_saving && !doc_formatting) {
                     doc->ClearTextHistory();
                     doc_formatting = true;
+                    bool use_tabs = settings.use_tabs;
+                    int indent_size = settings.indent_size;
                     if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, &doc_formatting, &search_dirty]() {
-                        doc->RebuildTextFromTree();
+                    doc_thread = std::thread([doc, use_tabs, indent_size, &doc_formatting, &search_dirty]() {
+                        doc->RebuildTextFromTree(use_tabs, indent_size);
                         doc_formatting = false;
                         search_dirty = true;
                     });
