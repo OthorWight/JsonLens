@@ -111,6 +111,7 @@ typedef struct JsonValue {
     uint64_t offset : 60;
     char *pre_comment;
     char *post_comment;
+    char *trailing_comment;
 } JsonValue;
 
 struct JsonNode {
@@ -453,6 +454,7 @@ static JsonValue *make_value(Arena *a, JsonType type) {
         v->offset = 0;
         v->pre_comment = NULL;
         v->post_comment = NULL;
+        v->trailing_comment = NULL;
         if (type == JSON_ARRAY || type == JSON_OBJECT) {
             v->as.list.items = NULL;
             v->as.list.count = 0;
@@ -976,6 +978,7 @@ static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int de
         out_val->pre_comment = NULL;
     }
     out_val->post_comment = NULL;
+    out_val->trailing_comment = NULL;
 
     unsigned char c = (unsigned char)*s->curr;
     parse_func func = dispatch_table[c];
@@ -1003,20 +1006,9 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.last_comment = NULL;
     skip_whitespace(&s);
     if (s.last_comment) {
-        if (root->post_comment) {
-            size_t old_len = strlen(root->post_comment);
-            size_t new_len = strlen(s.last_comment);
-            char *merged = arena_alloc_array(main, char, old_len + new_len + 2);
-            memcpy(merged, root->post_comment, old_len);
-            merged[old_len] = '\n';
-            memcpy(merged + old_len + 1, s.last_comment, new_len);
-            merged[old_len + 1 + new_len] = '\0';
-            root->post_comment = merged;
-        } else {
-            size_t clen = strlen(s.last_comment);
-            root->post_comment = arena_alloc_array(main, char, clen + 1);
-            strcpy(root->post_comment, s.last_comment);
-        }
+        size_t clen = strlen(s.last_comment);
+        root->trailing_comment = arena_alloc_array(main, char, clen + 1);
+        strcpy(root->trailing_comment, s.last_comment);
     }
 
     if (s.curr != s.end) {
@@ -1170,6 +1162,9 @@ JsonValue* json_clone(Arena *dest_arena, JsonValue *src) {
     
     new_val->post_comment = src->post_comment ? arena_alloc_array(dest_arena, char, strlen(src->post_comment) + 1) : NULL;
     if (new_val->post_comment) strcpy(new_val->post_comment, src->post_comment);
+
+    new_val->trailing_comment = src->trailing_comment ? arena_alloc_array(dest_arena, char, strlen(src->trailing_comment) + 1) : NULL;
+    if (new_val->trailing_comment) strcpy(new_val->trailing_comment, src->trailing_comment);
 
     switch (src->type) {
         case JSON_NUMBER: new_val->as.number = src->as.number; break;
@@ -1418,11 +1413,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
         }
     }
 
-    if (depth == 0 && v->post_comment) {
-        if (v->type != JSON_OBJECT && v->type != JSON_ARRAY) {
-            sb_putc(sb, '\n');
-            sb_append(sb, v->post_comment, strlen(v->post_comment));
-        }
+    if (depth == 0 && v->trailing_comment) {
+        sb_putc(sb, '\n');
+        sb_append(sb, v->trailing_comment, strlen(v->trailing_comment));
     }
 }
 
@@ -1494,6 +1487,7 @@ void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val)
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
         str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
+        str_val.trailing_comment = NULL;
         size_t len = strlen(val);
         str_val.as.string = arena_alloc_array(a, char, len + 1);
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
@@ -1503,16 +1497,19 @@ void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val)
 void json_add_number(Arena *a, JsonValue *obj, const char *key, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
     num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
+    num_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &num_val);
 }
 void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
     JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
     bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
+    bool_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &bool_val);
 }
 void json_add_null(Arena *a, JsonValue *obj, const char *key) {
     JsonValue null_val; null_val.type = JSON_NULL;
     null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
+    null_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &null_val);
 }
 
@@ -1523,6 +1520,7 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
         str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
+        str_val.trailing_comment = NULL;
         size_t len = strlen(val);
         str_val.as.string = arena_alloc_array(a, char, len + 1);
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
@@ -1532,16 +1530,19 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
 void json_append_number(Arena *a, JsonValue *arr, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
     num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
+    num_val.trailing_comment = NULL;
     json_list_append(a, arr, NULL, &num_val);
 }
 void json_append_bool(Arena *a, JsonValue *arr, bool val) {
     JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
     bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
+    bool_val.trailing_comment = NULL;
     json_list_append(a, arr, NULL, &bool_val);
 }
 void json_append_null(Arena *a, JsonValue *arr) {
     JsonValue null_val; null_val.type = JSON_NULL;
     null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
+    null_val.trailing_comment = NULL;
     json_list_append(a, arr, NULL, &null_val);
 }
 
