@@ -1263,7 +1263,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
 
     if (v->pre_comment) {
         sb_append(sb, v->pre_comment, strlen(v->pre_comment));
-        sb_putc(sb, '\n');
+        if (pretty) sb_putc(sb, '\n');
         if (pretty && depth > 0) {
             for (int j = 0; j < depth; j++) {
                 if (use_tabs) sb_putc(sb, '\t');
@@ -1318,7 +1318,6 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                             }
                         }
                         sb_append(sb, child->pre_comment, strlen(child->pre_comment));
-                        if (!pretty) sb_putc(sb, '\n');
                     }
                     
                     if (pretty) {
@@ -1347,7 +1346,6 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     sb_append(sb, v->post_comment, strlen(v->post_comment));
-                    if (!pretty) sb_putc(sb, '\n');
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
@@ -1375,7 +1373,6 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                             }
                         }
                         sb_append(sb, child->pre_comment, strlen(child->pre_comment));
-                        if (!pretty) sb_putc(sb, '\n');
                     }
                     
                     if (pretty) {
@@ -1407,7 +1404,6 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     sb_append(sb, v->post_comment, strlen(v->post_comment));
-                    if (!pretty) sb_putc(sb, '\n');
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
