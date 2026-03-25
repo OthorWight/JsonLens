@@ -1235,6 +1235,10 @@ int main(int /*argc*/, char** /*argv*/) {
     int error_fix_line = -1;
     std::vector<char> error_fix_buf;
 
+    int inline_edit_line = -1;
+    std::vector<char> inline_edit_buf;
+    bool inline_edit_focus = false;
+
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
         scroll_to_line = line;
@@ -1405,6 +1409,10 @@ int main(int /*argc*/, char** /*argv*/) {
             delete doc;
             doc = ready_doc;
             error_fix_line = -1;
+            inline_edit_line = -1;
+        }
+        if (doc_formatting) {
+            inline_edit_line = -1;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -2000,7 +2008,24 @@ int main(int /*argc*/, char** /*argv*/) {
                         };
 
                         if (ImGui::IsWindowHovered()) {
-                            if (ImGui::IsMouseClicked(0)) {
+                            if (ImGui::IsMouseDoubleClicked(0)) {
+                                size_t offset = GetOffsetFromMouse();
+                                inline_edit_line = doc->GetLineFromOffset(offset);
+                                
+                                size_t start = doc->line_offsets[inline_edit_line];
+                                size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
+                                size_t text_end = end;
+                                if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                                if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                                size_t len = text_end - start;
+                                
+                                inline_edit_buf.resize(len + 8192); // Provide space for edits
+                                memcpy(inline_edit_buf.data(), doc->data + start, len);
+                                inline_edit_buf[len] = '\0';
+                                inline_edit_focus = true;
+                                
+                                doc->select_start = doc->select_end = (size_t)-1;
+                            } else if (ImGui::IsMouseClicked(0)) {
                                 doc->select_start = doc->select_end = GetOffsetFromMouse();
                             }
                         }
@@ -2089,7 +2114,62 @@ int main(int /*argc*/, char** /*argv*/) {
                                     }
                                 }
 
-                                ImGui::TextUnformatted(doc->data + start, doc->data + end);
+                                if (inline_edit_line == (int)i) {
+                                    ImGui::PushID((int)i);
+                                    ImGui::PushItemWidth(-1.0f);
+                                    if (inline_edit_focus) {
+                                        ImGui::SetKeyboardFocusHere();
+                                        inline_edit_focus = false;
+                                    }
+                                    
+                                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+                                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                                    
+                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+                                    bool deactivated = ImGui::IsItemDeactivated();
+                                    
+                                    ImGui::PopStyleVar();
+                                    ImGui::PopStyleColor();
+                                    ImGui::PopItemWidth();
+                                    ImGui::PopID();
+                                    
+                                    if (enter_pressed) {
+                                        doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
+                                        doc->ClearAstHistory();
+                                        doc_formatting = true;
+                                        bool allow_comments = settings.allow_comments;
+                                        if (doc_thread.joinable()) doc_thread.join();
+                                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
+                                            doc->RebuildTreeFromText(allow_comments); 
+                                            doc_formatting = false; 
+                                            search_dirty = true; 
+                                        });
+                                        inline_edit_line = -1;
+                                    } else if (deactivated) {
+                                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                                            inline_edit_line = -1;
+                                        } else {
+                                            size_t text_end = end;
+                                            if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                                            std::string original_text(doc->data + start, text_end - start);
+                                            if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
+                                                doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
+                                                doc->ClearAstHistory();
+                                                doc_formatting = true;
+                                                bool allow_comments = settings.allow_comments;
+                                                if (doc_thread.joinable()) doc_thread.join();
+                                                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
+                                                    doc->RebuildTreeFromText(allow_comments); 
+                                                    doc_formatting = false; 
+                                                    search_dirty = true; 
+                                                });
+                                            }
+                                            inline_edit_line = -1;
+                                        }
+                                    }
+                                } else {
+                                    ImGui::TextUnformatted(doc->data + start, doc->data + end);
+                                }
                             }
                         }
                         ImGui::PopFont();
