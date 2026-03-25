@@ -98,8 +98,6 @@ typedef enum {
 typedef struct JsonNode JsonNode;
 
 typedef struct JsonValue {
-    JsonType type;
-    size_t offset;
     union {
         bool boolean;
         double number;
@@ -109,6 +107,8 @@ typedef struct JsonValue {
             size_t count;
         } list; 
     } as;
+    uint64_t type : 4;
+    uint64_t offset : 60;
 } JsonValue;
 
 struct JsonNode {
@@ -309,6 +309,14 @@ void arena_temp_end(ArenaTemp temp) {
 #define MAX_JSON_DEPTH 1000
 #define BLOCK_CAPACITY 128
 
+typedef struct KeyCacheEntry {
+    const char *source_str;
+    size_t source_len;
+    char *cached_str;
+} KeyCacheEntry;
+
+#define KEY_CACHE_CAPACITY 16384
+
 typedef struct {
     const char *start;
     const char *curr;
@@ -316,6 +324,7 @@ typedef struct {
     JsonError *err;
     Arena *scratch; 
     int flags;
+    KeyCacheEntry *key_cache;
 } ParseState;
 
 typedef struct NodeBlock NodeBlock;
@@ -454,12 +463,35 @@ static bool parse_string(Arena *a, ParseState *s, char **out_str) {
     if (scan >= s->end) { set_error(s, "Unterminated string"); return false; }
 
     size_t raw_len = scan - start_content;
+
+    KeyCacheEntry *entry = NULL;
+    if (raw_len < 128 && s->key_cache) {
+        uint32_t hash = 2166136261u;
+        for (size_t i = 0; i < raw_len; i++) {
+            hash ^= (uint8_t)start_content[i];
+            hash *= 16777619;
+        }
+        uint32_t slot = hash & (KEY_CACHE_CAPACITY - 1);
+        entry = &s->key_cache[slot];
+        
+        if (entry->cached_str && entry->source_len == raw_len && memcmp(entry->source_str, start_content, raw_len) == 0) {
+            *out_str = entry->cached_str;
+            advance(s, (int)raw_len + 1);
+            return true;
+        }
+    }
+
     if (!has_escapes) {
         char *str = arena_alloc_array(a, char, raw_len + 1);
         if (!str) return false; 
         memcpy(str, start_content, raw_len);
         str[raw_len] = '\0';
         *out_str = str;
+        if (entry) {
+            entry->source_str = start_content;
+            entry->source_len = raw_len;
+            entry->cached_str = str;
+        }
         advance(s, (int)raw_len + 1); 
         return true;
     }
@@ -538,6 +570,13 @@ static bool parse_string(Arena *a, ParseState *s, char **out_str) {
     }
     *out = '\0';
     *out_str = str;
+    
+    if (entry) {
+        entry->source_str = start_content;
+        entry->source_len = raw_len;
+        entry->cached_str = str;
+    }
+
     advance(s, (int)(scan - start_content) + 1); 
     return true;
 }
@@ -835,6 +874,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.start = input; s.curr = input; s.end = input + len;
     s.err = err; s.scratch = scratch;
     s.flags = flags;
+    s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * KEY_CACHE_CAPACITY);
 
     JsonValue *root = arena_alloc_struct(main, JsonValue);
     if (!root) return NULL;
