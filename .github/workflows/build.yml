@@ -64,12 +64,19 @@ jobs:
         run: |
           meson setup builddir
           ninja -C builddir
+
+      - name: Bundle Dependencies
+        run: |
+          # Finds all required MSYS2/UCRT64 DLLs (libgcc, libstdc++, SDL2, etc.) and copies them next to the executable
+          ldd builddir/json-lens.exe | grep '/ucrt64/bin' | awk '{print $3}' | xargs cp -t builddir/
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: JsonLens-Windows
-          path: builddir/json-lens.exe
+          path: |
+            builddir/json-lens.exe
+            builddir/*.dll
 
   build-macos:
     name: Build on macOS
