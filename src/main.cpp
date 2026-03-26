@@ -2056,11 +2056,7 @@ int main(int /*argc*/, char** /*argv*/) {
                         auto GetOffsetFromMouse = [&]() -> size_t {
                             if (doc->line_offsets.empty()) return 0;
                             
-                            double scroll_y = (double)ImGui::GetScrollY();
-                            double window_y = (double)ImGui::GetWindowPos().y;
-                            double padding_y = (double)ImGui::GetStyle().WindowPadding.y;
-                            
-                            double local_mouse_y = (double)ImGui::GetMousePos().y - window_y - padding_y + scroll_y;
+                            double local_mouse_y = (double)ImGui::GetMousePos().y - (double)text_start_pos.y;
                             int raw_line_idx = (int)(local_mouse_y / (double)exact_item_height);
                             
                             if (raw_line_idx < 0) raw_line_idx = 0;
@@ -2099,8 +2095,12 @@ int main(int /*argc*/, char** /*argv*/) {
                         bool is_mouse_over_scrollbars = false;
                         ImVec2 mouse_pos = ImGui::GetMousePos();
                         ImVec2 win_pos = ImGui::GetWindowPos();
-                        ImVec2 content_max = ImGui::GetWindowContentRegionMax();
-                        if (mouse_pos.x >= win_pos.x + content_max.x || mouse_pos.y >= win_pos.y + content_max.y) {
+                        ImVec2 win_size = ImGui::GetWindowSize();
+                        float scrollbar_size = ImGui::GetStyle().ScrollbarSize;
+                        if (ImGui::GetScrollMaxY() > 0.0f && mouse_pos.x >= win_pos.x + win_size.x - scrollbar_size) {
+                            is_mouse_over_scrollbars = true;
+                        }
+                        if (ImGui::GetScrollMaxX() > 0.0f && mouse_pos.y >= win_pos.y + win_size.y - scrollbar_size) {
                             is_mouse_over_scrollbars = true;
                         }
 
