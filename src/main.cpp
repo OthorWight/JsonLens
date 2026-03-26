@@ -2257,7 +2257,66 @@ int main(int /*argc*/, char** /*argv*/) {
                                         }
                                     }
                                 } else {
-                                    ImGui::TextUnformatted(doc->data + start, doc->data + end);
+                                    const char* p = doc->data + start;
+                                    const char* end_ptr = doc->data + end;
+                                    bool first = true;
+                                    int token_count = 0;
+                                    
+                                    ImVec4 col_str(0.80f, 0.53f, 0.35f, 1.0f);   // Orange
+                                    ImVec4 col_key(0.61f, 0.86f, 0.99f, 1.0f);   // Light Blue
+                                    ImVec4 col_num(0.71f, 0.81f, 0.66f, 1.0f);   // Pale Green
+                                    ImVec4 col_bool(0.34f, 0.61f, 0.84f, 1.0f);  // Blue
+                                    ImVec4 col_punc(0.60f, 0.60f, 0.60f, 1.0f);  // Gray
+                                    ImVec4 col_comm(0.40f, 0.70f, 0.40f, 1.0f);  // Dark Green
+                                    
+                                    while (p < end_ptr) {
+                                        const char* token_start = p;
+                                        ImVec4 col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                                        
+                                        if (token_count++ > 2000) {
+                                            // Safeguard against freezing ImGui on massive single-line minified files
+                                            if (!first) ImGui::SameLine(0.0f, 0.0f);
+                                            ImGui::TextUnformatted(token_start, end_ptr);
+                                            break;
+                                        }
+                                        
+                                        if (isspace(*p)) {
+                                            while (p < end_ptr && isspace(*p)) p++;
+                                        } else if (*p == '"') {
+                                            p++;
+                                            while (p < end_ptr) {
+                                                if (*p == '\\' && p + 1 < end_ptr) p += 2;
+                                                else if (*p == '"') { p++; break; }
+                                                else p++;
+                                            }
+                                            bool is_obj_key = false;
+                                            const char* peek = p;
+                                            while (peek < end_ptr && isspace(*peek)) peek++;
+                                            if (peek < end_ptr && *peek == ':') is_obj_key = true;
+                                            col = is_obj_key ? col_key : col_str;
+                                        } else if (isdigit(*p) || *p == '-') {
+                                            col = col_num;
+                                            while (p < end_ptr && (isalnum(*p) || *p == '.' || *p == '+' || *p == '-')) p++;
+                                        } else if (isalpha(*p)) {
+                                            col = col_bool;
+                                            while (p < end_ptr && isalpha(*p)) p++;
+                                        } else if (*p == '/' && p + 1 < end_ptr && *(p+1) == '/') {
+                                            col = col_comm;
+                                            p = end_ptr; // Rest of line is a comment
+                                        } else {
+                                            col = col_punc;
+                                            p++;
+                                        }
+                                        
+                                        if (!first) ImGui::SameLine(0.0f, 0.0f);
+                                        ImGui::PushStyleColor(ImGuiCol_Text, col);
+                                        ImGui::TextUnformatted(token_start, p);
+                                        ImGui::PopStyleColor();
+                                        first = false;
+                                    }
+                                    
+                                    if (first) ImGui::TextUnformatted("");
+                                    else ImGui::NewLine();
                                 }
                             }
                         }
