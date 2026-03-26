@@ -1130,6 +1130,9 @@ int main(int /*argc*/, char** /*argv*/) {
                                     edit_state.p_cursor = &inline_edit_cursor_pos;
                                     edit_state.current_cursor = 0;
 
+                                    ImVec4 orig_text_col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0)); // Transparent text for input
+
                                     ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways;
                                     bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags,
                                         [](ImGuiInputTextCallbackData* data) -> int {
@@ -1148,6 +1151,102 @@ int main(int /*argc*/, char** /*argv*/) {
                                     bool move_up = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_UpArrow);
                                     bool move_down = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_DownArrow);
                                     
+                                    ImGui::PopStyleColor(); // Pop Transparent Text
+
+                                    // Render custom highlighted text
+                                    ImVec2 item_min = ImGui::GetItemRectMin();
+                                    ImVec2 item_max = ImGui::GetItemRectMax();
+                                    ImGuiID id = ImGui::GetID("##inline_edit");
+                                    ImGuiInputTextState* state = ImGui::GetInputTextState(id);
+                                    float scroll_x = state ? state->ScrollX : 0.0f;
+                                    
+                                    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                                    draw_list->PushClipRect(item_min, ImVec2(item_max.x, item_max.y + ImGui::GetFontSize() * 0.3f), true);
+                                    
+                                    ImVec2 text_pos = ImVec2(item_min.x - scroll_x, item_min.y);
+                                    
+                                    const char* p = inline_edit_buf.data();
+                                    const char* end_ptr = p + strlen(p);
+                                    ImVec2 current_pos = text_pos;
+
+                                    ImVec4 col_str(0.80f, 0.53f, 0.35f, 1.0f);
+                                    ImVec4 col_key(0.61f, 0.86f, 0.99f, 1.0f);
+                                    ImVec4 col_num(0.71f, 0.81f, 0.66f, 1.0f);
+                                    ImVec4 col_bool(0.34f, 0.61f, 0.84f, 1.0f);
+                                    ImVec4 col_punc(0.60f, 0.60f, 0.60f, 1.0f);
+                                    ImVec4 col_comm(0.40f, 0.70f, 0.40f, 1.0f);
+
+                                    ImFont* font = ImGui::GetFont();
+                                    float font_size = ImGui::GetFontSize();
+
+                                    while (p < end_ptr) {
+                                        const char* token_start = p;
+                                        ImVec4 col = orig_text_col;
+                                        
+                                        if (isspace(*p)) {
+                                            while (p < end_ptr && isspace(*p)) p++;
+                                        } else if (*p == '"') {
+                                            p++;
+                                            while (p < end_ptr) {
+                                                if (*p == '\\' && p + 1 < end_ptr) p += 2;
+                                                else if (*p == '"') { p++; break; }
+                                                else p++;
+                                            }
+                                            bool is_obj_key = false;
+                                            const char* peek = p;
+                                            while (peek < end_ptr && isspace(*peek)) peek++;
+                                            if (peek < end_ptr && *peek == ':') is_obj_key = true;
+                                            col = is_obj_key ? col_key : col_str;
+                                        } else if (isdigit(*p) || *p == '-') {
+                                            col = col_num;
+                                            while (p < end_ptr && (isalnum(*p) || *p == '.' || *p == '+' || *p == '-')) p++;
+                                        } else if (isalpha(*p)) {
+                                            col = col_bool;
+                                            while (p < end_ptr && isalpha(*p)) p++;
+                                        } else if (*p == '/' && p + 1 < end_ptr) {
+                                            if (*(p+1) == '/') {
+                                                col = col_comm;
+                                                p = end_ptr;
+                                            } else if (*(p+1) == '*') {
+                                                col = col_comm;
+                                                const char* end_comment = p + 2;
+                                                while (end_comment < end_ptr) {
+                                                    if (*end_comment == '*' && (end_comment + 1 < end_ptr) && *(end_comment + 1) == '/') {
+                                                        p = end_comment + 2;
+                                                        break;
+                                                    }
+                                                    end_comment++;
+                                                }
+                                                if (end_comment >= end_ptr) { p = end_ptr; }
+                                            } else { col = col_punc; p++; }
+                                        } else {
+                                            col = col_punc;
+                                            p++;
+                                        }
+                                        
+                                        if (p > token_start) {
+                                            draw_list->AddText(font, font_size, current_pos, ImGui::ColorConvertFloat4ToU32(col), token_start, p);
+                                            current_pos.x += font->CalcTextSizeA(font_size, FLT_MAX, -1.0f, token_start, p, NULL).x;
+                                        }
+                                    }
+
+                                    if (ImGui::IsItemFocused()) {
+                                        static double last_cursor_time = 0.0;
+                                        static int last_cursor_pos_track = -1;
+                                        if (last_cursor_pos_track != edit_state.current_cursor) {
+                                            last_cursor_pos_track = edit_state.current_cursor;
+                                            last_cursor_time = ImGui::GetTime();
+                                        }
+                                        if (fmod(ImGui::GetTime() - last_cursor_time, 1.0) < 0.5) {
+                                            float cursor_x = font->CalcTextSizeA(font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + edit_state.current_cursor, NULL).x;
+                                            ImVec2 p1 = ImVec2(text_pos.x + cursor_x, text_pos.y);
+                                            ImVec2 p2 = ImVec2(p1.x, p1.y + font_size);
+                                            draw_list->AddLine(p1, p2, ImGui::ColorConvertFloat4ToU32(orig_text_col), 1.0f);
+                                        }
+                                    }
+
+                                    draw_list->PopClipRect();
+
                                     ImGui::PopStyleVar();
                                     ImGui::PopStyleColor();
                                     ImGui::PopItemWidth();
