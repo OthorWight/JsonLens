@@ -741,7 +741,44 @@ int main(int /*argc*/, char** /*argv*/) {
             search_dirty = false;
         }
 
-        if (ImGui::BeginTabBar("Views")) {
+        if (!doc->data && !doc_loading && !doc_saving && !doc_formatting) {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 center = ImVec2(ImGui::GetCursorScreenPos().x + avail.x * 0.5f, ImGui::GetCursorScreenPos().y + avail.y * 0.5f);
+            ImVec2 box_size(450, 220);
+            ImVec2 box_min = ImVec2(center.x - box_size.x * 0.5f, center.y - box_size.y * 0.5f);
+            ImVec2 box_max = ImVec2(center.x + box_size.x * 0.5f, center.y + box_size.y * 0.5f);
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(box_min, box_max, IM_COL32(35, 38, 43, 255), 12.0f);
+            dl->AddRect(box_min, box_max, IM_COL32(100, 150, 200, 150), 12.0f, 0, 2.0f);
+
+            const char* title = "No File Loaded";
+            const char* sub = "Drag & Drop a .json file here";
+            const char* sub2 = "or click to browse";
+            
+            float title_size_f = ImGui::GetFontSize() * 1.5f;
+            ImVec2 title_dim = ImGui::GetFont()->CalcTextSizeA(title_size_f, FLT_MAX, -1.0f, title);
+            ImVec2 sub_dim = ImGui::CalcTextSize(sub);
+            ImVec2 sub2_dim = ImGui::CalcTextSize(sub2);
+
+            float total_y = title_dim.y + sub_dim.y + sub2_dim.y + 15.0f;
+            float start_y = center.y - total_y * 0.5f;
+
+            dl->AddText(ImGui::GetFont(), title_size_f, ImVec2(center.x - title_dim.x * 0.5f, start_y), IM_COL32(230, 230, 230, 255), title);
+            start_y += title_dim.y + 10.0f;
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(center.x - sub_dim.x * 0.5f, start_y), IM_COL32(150, 150, 150, 255), sub);
+            start_y += sub_dim.y + 5.0f;
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(center.x - sub2_dim.x * 0.5f, start_y), IM_COL32(120, 120, 120, 255), sub2);
+
+            ImGui::SetCursorScreenPos(box_min);
+            if (ImGui::InvisibleButton("##DropZone", box_size)) {
+                LoadFile(ShowOpenFileDialog(settings.last_folder));
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                dl->AddRectFilled(box_min, box_max, IM_COL32(255, 255, 255, 15), 12.0f);
+            }
+        } else if (ImGui::BeginTabBar("Views")) {
             ImGuiTabItemFlags tree_tab_flags = force_tree_tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (ImGui::BeginTabItem("Tree View", nullptr, tree_tab_flags)) {
                 active_view = ActiveView::Tree;
