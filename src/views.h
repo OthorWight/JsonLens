@@ -33,6 +33,6 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
 void LayoutGraphNode(GraphNode* node, int depth, float& current_y, float& max_x, float current_x = 40.0f);
 void DrawGraphEdges(ImDrawList* dl, GraphNode* node, ImVec2 offset, const ImRect& clip_rect);
 void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse_pos, GraphNode** out_hovered, const ImRect& clip_rect, JsonValue* highlight_val, double highlight_time, int focus_frames);
-int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time);
+int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time, std::string current_string_path = "root");
 
 #endif // JSONLENS_VIEWS_H

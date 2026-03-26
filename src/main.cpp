@@ -20,6 +20,112 @@
 #include "views.h"
 #include "document.h"
 
+struct PathToken {
+    enum Type { Key, Index, Wildcard } type;
+    std::string key;
+    int index;
+};
+
+std::vector<PathToken> ParseJsonPath(const std::string& path) {
+    std::vector<PathToken> tokens;
+    size_t i = 0;
+    while (i < path.length()) {
+        if (isspace(path[i])) { i++; continue; }
+        if (path[i] == '$') { i++; continue; }
+        if (i + 4 <= path.length() && path.substr(i, 4) == "root") { i += 4; continue; }
+        
+        if (path[i] == '.') {
+            i++;
+            if (i < path.length() && path[i] == '*') {
+                tokens.push_back({PathToken::Wildcard, "", 0});
+                i++;
+            } else {
+                std::string key;
+                while (i < path.length() && path[i] != '.' && path[i] != '[' && !isspace(path[i])) {
+                    key += path[i];
+                    i++;
+                }
+                if (!key.empty()) tokens.push_back({PathToken::Key, key, 0});
+            }
+        } else if (path[i] == '[') {
+            i++;
+            while (i < path.length() && isspace(path[i])) i++;
+            if (i < path.length() && path[i] == '*') {
+                tokens.push_back({PathToken::Wildcard, "", 0});
+                i++;
+                while (i < path.length() && path[i] != ']') i++;
+                if (i < path.length() && path[i] == ']') i++;
+            } else if (i < path.length() && (path[i] == '"' || path[i] == '\'')) {
+                char quote = path[i];
+                i++;
+                std::string key;
+                while (i < path.length() && path[i] != quote) {
+                    key += path[i];
+                    i++;
+                }
+                if (i < path.length() && path[i] == quote) i++;
+                while (i < path.length() && path[i] != ']') i++;
+                if (i < path.length() && path[i] == ']') i++;
+                tokens.push_back({PathToken::Key, key, 0});
+            } else {
+                std::string idx_str;
+                while (i < path.length() && isdigit(path[i])) {
+                    idx_str += path[i];
+                    i++;
+                }
+                while (i < path.length() && path[i] != ']') i++;
+                if (i < path.length() && path[i] == ']') i++;
+                if (!idx_str.empty()) tokens.push_back({PathToken::Index, "", std::stoi(idx_str)});
+            }
+        } else {
+            std::string key;
+            while (i < path.length() && path[i] != '.' && path[i] != '[' && !isspace(path[i])) {
+                key += path[i];
+                i++;
+            }
+            if (!key.empty()) tokens.push_back({PathToken::Key, key, 0});
+        }
+    }
+    return tokens;
+}
+
+void EvaluateJsonPathTokens(JsonValue* current, const std::vector<PathToken>& tokens, size_t token_idx, std::vector<std::vector<JsonValue*>>& paths, std::vector<JsonValue*>& current_path) {
+    if (!current) return;
+    current_path.push_back(current);
+
+    if (token_idx >= tokens.size()) {
+        paths.push_back(current_path);
+        current_path.pop_back();
+        return;
+    }
+
+    const PathToken& token = tokens[token_idx];
+    if (token.type == PathToken::Key) {
+        if (current->type == JSON_OBJECT) {
+            for (size_t i = 0; i < current->as.list.count; i++) {
+                if (current->as.list.items[i].key && token.key == current->as.list.items[i].key) {
+                    EvaluateJsonPathTokens(&current->as.list.items[i].value, tokens, token_idx + 1, paths, current_path);
+                    break;
+                }
+            }
+        }
+    } else if (token.type == PathToken::Index) {
+        if (current->type == JSON_ARRAY) {
+            if (token.index >= 0 && token.index < (int)current->as.list.count) {
+                EvaluateJsonPathTokens(&current->as.list.items[token.index].value, tokens, token_idx + 1, paths, current_path);
+            }
+        }
+    } else if (token.type == PathToken::Wildcard) {
+        if (current->type == JSON_OBJECT || current->type == JSON_ARRAY) {
+            for (size_t i = 0; i < current->as.list.count; i++) {
+                EvaluateJsonPathTokens(&current->as.list.items[i].value, tokens, token_idx + 1, paths, current_path);
+            }
+        }
+    }
+    
+    current_path.pop_back();
+}
+
 int main(int /*argc*/, char** /*argv*/) {
     // Prefer Wayland natively on Linux, fallback to X11
     SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
@@ -106,6 +212,10 @@ int main(int /*argc*/, char** /*argv*/) {
     bool inline_edit_focus = false;
     bool inline_edit_needs_refresh = false;
     int inline_edit_cursor_pos = -1;
+
+    char jsonpath_buf[256] = "";
+    std::vector<std::vector<JsonValue*>> jsonpath_results;
+    int jsonpath_active_idx = -1;
 
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
@@ -257,6 +367,29 @@ int main(int /*argc*/, char** /*argv*/) {
                 doc_formatting = false;
                 search_dirty = true;
             });
+        }
+    };
+
+    auto ApplyJsonPathResult = [&]() {
+        if (jsonpath_active_idx >= 0 && jsonpath_active_idx < (int)jsonpath_results.size()) {
+            tree_focus_path = jsonpath_results[jsonpath_active_idx];
+            tree_highlight_val = tree_focus_path.back();
+            tree_highlight_time = ImGui::GetTime();
+            tree_focus_frames = 3;
+            
+            if (active_view == ActiveView::Graph) {
+                for (size_t i = 0; i < tree_focus_path.size() - 1; ++i) {
+                    if (tree_focus_path[i]->type == JSON_OBJECT || tree_focus_path[i]->type == JSON_ARRAY) {
+                        for (size_t j = 0; j < tree_focus_path[i]->as.list.count; ++j) {
+                            if (&tree_focus_path[i]->as.list.items[j].value == tree_focus_path[i+1]) {
+                                doc->graph_pagination[tree_focus_path[i]] = (j / doc->pagination_size) * doc->pagination_size;
+                                break;
+                            }
+                        }
+                    }
+                }
+                doc->graph_dirty = true;
+            }
         }
     };
 
@@ -783,6 +916,43 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginTabItem("Tree View", nullptr, tree_tab_flags)) {
                 active_view = ActiveView::Tree;
                 force_tree_tab = false;
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("JSONPath:");
+                ImGui::SameLine();
+                float input_w = ImGui::GetContentRegionAvail().x - 180.0f;
+                if (input_w < 100.0f) input_w = 100.0f;
+                ImGui::SetNextItemWidth(input_w);
+                if (ImGui::InputText("##jsonpath_tree", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    jsonpath_results.clear();
+                    jsonpath_active_idx = -1;
+                    if (doc->root_json && jsonpath_buf[0] != '\0') {
+                        auto tokens = ParseJsonPath(jsonpath_buf);
+                        std::vector<JsonValue*> init_path;
+                        EvaluateJsonPathTokens(doc->root_json, tokens, 0, jsonpath_results, init_path);
+                        if (!jsonpath_results.empty()) {
+                            jsonpath_active_idx = 0;
+                            ApplyJsonPathResult();
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (jsonpath_results.empty()) {
+                    if (jsonpath_buf[0] != '\0') ImGui::TextDisabled("0 results");
+                } else {
+                    ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    ImGui::SameLine();
+                    if (ImGui::Button("<##jp_t") && !jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
+                        ApplyJsonPathResult();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(">##jp_t") && !jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
+                        ApplyJsonPathResult();
+                    }
+                }
+
                 ImGui::BeginChild("TreeChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 if (doc_loading || doc_saving || doc_formatting) {
                     const char* msg = doc_loading ? "Loading and parsing JSON... Please wait." : 
@@ -817,6 +987,43 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginTabItem("Graph View", nullptr, graph_tab_flags)) {
                 active_view = ActiveView::Graph;
                 force_graph_tab = false;
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("JSONPath:");
+                ImGui::SameLine();
+                float input_w = ImGui::GetContentRegionAvail().x - 180.0f;
+                if (input_w < 100.0f) input_w = 100.0f;
+                ImGui::SetNextItemWidth(input_w);
+                if (ImGui::InputText("##jsonpath_graph", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    jsonpath_results.clear();
+                    jsonpath_active_idx = -1;
+                    if (doc->root_json && jsonpath_buf[0] != '\0') {
+                        auto tokens = ParseJsonPath(jsonpath_buf);
+                        std::vector<JsonValue*> init_path;
+                        EvaluateJsonPathTokens(doc->root_json, tokens, 0, jsonpath_results, init_path);
+                        if (!jsonpath_results.empty()) {
+                            jsonpath_active_idx = 0;
+                            ApplyJsonPathResult();
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (jsonpath_results.empty()) {
+                    if (jsonpath_buf[0] != '\0') ImGui::TextDisabled("0 results");
+                } else {
+                    ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    ImGui::SameLine();
+                    if (ImGui::Button("<##jp_g") && !jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
+                        ApplyJsonPathResult();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button(">##jp_g") && !jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
+                        ApplyJsonPathResult();
+                    }
+                }
+
                 ImGui::BeginChild("GraphViewChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
                 if (doc_loading || doc_saving || doc_formatting) {
                     const char* msg = doc_loading ? "Loading and parsing JSON... Please wait." : 

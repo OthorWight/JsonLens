@@ -161,7 +161,7 @@ void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse
     }
 }
 
-int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time) {
+int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time, std::string current_string_path) {
     int action = 0;
     JsonValue* val = &node->value;
     if (!val) return false;
@@ -194,6 +194,29 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             }
         }
     };
+
+    std::string my_path = current_string_path;
+    if (node_index >= 0) {
+        if (node->key) {
+            bool valid_identifier = true;
+            if (!isalpha(node->key[0]) && node->key[0] != '_') valid_identifier = false;
+            for (int i = 1; node->key[i]; i++) {
+                if (!isalnum(node->key[i]) && node->key[i] != '_') valid_identifier = false;
+            }
+            if (valid_identifier) {
+                my_path += ".";
+                my_path += node->key;
+            } else {
+                my_path += "[\"";
+                my_path += node->key;
+                my_path += "\"]";
+            }
+        } else {
+            my_path += "[";
+            my_path += std::to_string(node_index);
+            my_path += "]";
+        }
+    }
 
     if (node->key != nullptr) {
         char key_buf[256];
@@ -284,6 +307,17 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         if (ImGui::MenuItem("Boolean", nullptr, val->type == JSON_BOOL)) { if (val->type != JSON_BOOL) { bool b = false; if (val->type == JSON_NUMBER) b = (val->as.number != 0.0); else if (val->type == JSON_STRING && val->as.string) b = (strcmp(val->as.string, "true") == 0 || strcmp(val->as.string, "True") == 0 || atof(val->as.string) != 0.0); doc->PushUndo(UndoActionType::SetNode, current_path, *node); *val = *json_create_bool(&doc->main_arena, b); action |= 1; } }
         if (ImGui::MenuItem("Null",    nullptr, val->type == JSON_NULL)) { if (val->type != JSON_NULL) { doc->PushUndo(UndoActionType::SetNode, current_path, *node); *val = *json_create_null(&doc->main_arena); action |= 1; } }
         
+        ImGui::Separator();
+        if (ImGui::MenuItem("Copy Path")) {
+            ImGui::SetClipboardText(my_path.c_str());
+        }
+        if (ImGui::MenuItem("Copy Value")) {
+            Arena temp; arena_init(&temp);
+            char* str = json_to_string(&temp, val, true, false, 4, false);
+            if (str) ImGui::SetClipboardText(str);
+            arena_free(&temp);
+        }
+
         if (node_index >= 0) {
             ImGui::Separator();
             if (ImGui::MenuItem("Remove Node")) { doc->PushUndo(UndoActionType::InsertNode, current_path, *node); action |= 2; }
@@ -323,7 +357,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             
             if (show_chunk) {
                 for (size_t i = chunk_start; i < chunk_end; i++) {
-                    int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], (int)i, current_path, focus_path, highlight_val, highlight_time);
+                    int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], (int)i, current_path, focus_path, highlight_val, highlight_time, my_path);
                     if (child_action & 1) action |= 1;
                     if (child_action & 2) item_to_remove = (int)i; 
                 }
