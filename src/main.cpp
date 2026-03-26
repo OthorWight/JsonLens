@@ -953,21 +953,32 @@ int main(int /*argc*/, char** /*argv*/) {
                     }
                 } else {
                     ImGui::SameLine();
-                    float text_start_x = ImGui::GetCursorPosX();
-                    ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
-                    
+
+                    const char* prev_label = "<##jp_t";
+                    const char* next_label = ">##jp_t";
+                    float prev_button_w = ImGui::CalcTextSize(prev_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    float next_button_w = ImGui::CalcTextSize(next_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+
                     char max_text[64];
                     snprintf(max_text, sizeof(max_text), "%d / %d", (int)jsonpath_results.size(), (int)jsonpath_results.size());
                     float max_text_w = ImGui::CalcTextSize(max_text).x;
-                    
+
+                    float group_width = max_text_w + prev_button_w + next_button_w + ImGui::GetStyle().ItemSpacing.x * 2;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - group_width);
+
+                    char current_text[64];
+                    snprintf(current_text, sizeof(current_text), "%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    float current_text_w = ImGui::CalcTextSize(current_text).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (max_text_w - current_text_w));
+                    ImGui::TextUnformatted(current_text);
+
                     ImGui::SameLine();
-                    ImGui::SetCursorPosX(text_start_x + max_text_w + ImGui::GetStyle().ItemSpacing.x);
-                    if (ImGui::Button("<##jp_t")) {
+                    if (ImGui::Button(prev_label)) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(">##jp_t")) {
+                    if (ImGui::Button(next_label)) {
                         jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
                         ApplyJsonPathResult();
                     }
@@ -1041,21 +1052,32 @@ int main(int /*argc*/, char** /*argv*/) {
                     }
                 } else {
                     ImGui::SameLine();
-                    float text_start_x = ImGui::GetCursorPosX();
-                    ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
-                    
+
+                    const char* prev_label = "<##jp_g";
+                    const char* next_label = ">##jp_g";
+                    float prev_button_w = ImGui::CalcTextSize(prev_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    float next_button_w = ImGui::CalcTextSize(next_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+
                     char max_text[64];
                     snprintf(max_text, sizeof(max_text), "%d / %d", (int)jsonpath_results.size(), (int)jsonpath_results.size());
                     float max_text_w = ImGui::CalcTextSize(max_text).x;
-                    
+
+                    float group_width = max_text_w + prev_button_w + next_button_w + ImGui::GetStyle().ItemSpacing.x * 2;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - group_width);
+
+                    char current_text[64];
+                    snprintf(current_text, sizeof(current_text), "%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    float current_text_w = ImGui::CalcTextSize(current_text).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (max_text_w - current_text_w));
+                    ImGui::TextUnformatted(current_text);
+
                     ImGui::SameLine();
-                    ImGui::SetCursorPosX(text_start_x + max_text_w + ImGui::GetStyle().ItemSpacing.x);
-                    if (ImGui::Button("<##jp_g")) {
+                    if (ImGui::Button(prev_label)) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(">##jp_g")) {
+                    if (ImGui::Button(next_label)) {
                         jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
                         ApplyJsonPathResult();
                     }
