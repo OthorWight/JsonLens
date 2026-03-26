@@ -54,6 +54,7 @@ int main(int /*argc*/, char** /*argv*/) {
     style.Colors[ImGuiCol_PopupBg]   = ImVec4(0.15f, 0.15f, 0.15f, 0.98f);
     style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
     style.Colors[ImGuiCol_Border]    = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+    style.Colors[ImGuiCol_NavHighlight]= ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
     style.PopupRounding              = 4.0f;
     style.FrameRounding              = 3.0f;
 
