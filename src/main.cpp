@@ -21,6 +21,16 @@
 
 #include "arena_json.h"
 
+size_t GetArenaRegionCount(const Arena* a) {
+    size_t count = 0;
+    ArenaRegion* curr = a->begin;
+    while (curr) {
+        count++;
+        curr = curr->next;
+    }
+    return count;
+}
+
 size_t GetArenaMemoryUsage(const Arena* a) {
     size_t total = 0;
     ArenaRegion* curr = a->begin;
@@ -91,6 +101,38 @@ struct TextReplaceDelta {
     std::string old_str;
     std::string new_str;
 };
+
+struct JsonTreeStats {
+    size_t total_nodes = 0;
+    size_t max_depth = 0;
+    size_t objects = 0;
+    size_t arrays = 0;
+    size_t strings = 0;
+    size_t numbers = 0;
+    size_t booleans = 0;
+    size_t nulls = 0;
+};
+
+void CalculateJsonStats(JsonValue* val, JsonTreeStats& stats, size_t current_depth) {
+    if (!val) return;
+    stats.total_nodes++;
+    if (current_depth > stats.max_depth) stats.max_depth = current_depth;
+    
+    switch (val->type) {
+        case JSON_OBJECT:
+            stats.objects++;
+            for (size_t i = 0; i < val->as.list.count; i++) CalculateJsonStats(&val->as.list.items[i].value, stats, current_depth + 1);
+            break;
+        case JSON_ARRAY:
+            stats.arrays++;
+            for (size_t i = 0; i < val->as.list.count; i++) CalculateJsonStats(&val->as.list.items[i].value, stats, current_depth + 1);
+            break;
+        case JSON_STRING: stats.strings++; break;
+        case JSON_NUMBER: stats.numbers++; break;
+        case JSON_BOOL:   stats.booleans++; break;
+        case JSON_NULL:   stats.nulls++; break;
+    }
+}
 
 struct UndoRecord {
     UndoActionType action;
@@ -334,6 +376,9 @@ struct LargeTextFile {
     
     int pagination_size = 2000;
 
+    JsonTreeStats ast_stats;
+    size_t max_line_length = 0;
+
     Arena main_arena;
     Arena scratch_arena;
     JsonValue* root_json = nullptr;
@@ -363,6 +408,7 @@ struct LargeTextFile {
         line_offsets.push_back(0);
         
         size_t start = 0;
+        size_t max_len = 0;
         while (start < size) {
             size_t remain = size - start;
             size_t chunk = (remain > 4096) ? 4096 : remain;
@@ -370,18 +416,25 @@ struct LargeTextFile {
             const void* p = memchr(data + start, '\n', chunk);
             if (p) {
                 size_t next_start = (size_t)((const char*)p - data) + 1;
+                size_t len = next_start - start - 1;
+                if (len > max_len) max_len = len;
                 line_offsets.push_back(next_start);
                 start = next_start;
             } else if (remain >= 4096) {
+                size_t len = 4096;
+                if (len > max_len) max_len = len;
                 line_offsets.push_back(start + 4096);
                 start += 4096;
             } else {
+                size_t len = remain;
+                if (len > max_len) max_len = len;
                 break;
             }
         }
         
         // Free any unused capacity if our size/50 estimate was too generous (e.g., minified JSON)
         line_offsets.shrink_to_fit();
+        max_line_length = max_len;
     }
 
     int GetLineFromOffset(size_t off) const {
@@ -426,6 +479,13 @@ struct LargeTextFile {
             for (const auto& d : r.text_deltas) total += d.old_str.capacity() + d.new_str.capacity();
         }
         return total;
+    }
+
+    void RecomputeStats() {
+        ast_stats = JsonTreeStats();
+        if (root_json) {
+            CalculateJsonStats(root_json, ast_stats, 0);
+        }
     }
 
     void Load(const char* filepath, bool allow_comments) {
@@ -476,15 +536,7 @@ struct LargeTextFile {
         index_time_ms = (double)(t5 - t4) * 1000.0 / t_freq;
         
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
-
-        printf("--- Load Stats ---\n");
-        printf("File Size: %s\n", FormatMemory(size).c_str());
-        printf("Load Time: %s\n", FormatTime(load_time_ms).c_str());
-        printf("Parse Time: %s\n", FormatTime(parse_time_ms).c_str());
-        printf("Index Time: %s\n", FormatTime(index_time_ms).c_str());
-        printf("Parse Memory: %s\n", FormatMemory(parse_memory_bytes).c_str());
-        printf("History Memory: %s\n", FormatMemory(GetHistoryMemoryUsage()).c_str());
-        printf("------------------\n");
+        RecomputeStats();
     }
 
     void RebuildTextFromTree(bool use_tabs, int indent_step, bool keep_comments) {
@@ -516,13 +568,6 @@ struct LargeTextFile {
         }
         tree_dirty = false;
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
-
-        printf("--- Format Stats ---\n");
-        printf("Format Time: %s\n", FormatTime(format_time_ms).c_str());
-        printf("Index Time: %s\n", FormatTime(index_time_ms).c_str());
-        printf("Parse Memory: %s\n", FormatMemory(parse_memory_bytes).c_str());
-        printf("History Memory: %s\n", FormatMemory(GetHistoryMemoryUsage()).c_str());
-        printf("--------------------\n");
     }
 
     void SaveToFile(const char* filepath, bool use_tabs, int indent_step, bool keep_comments) {
@@ -650,6 +695,7 @@ struct LargeTextFile {
         Uint64 t1 = SDL_GetPerformanceCounter();
         parse_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
+        RecomputeStats();
     }
 
     void ReplaceCurrent(const char* search_str, const char* replace_str, const std::vector<size_t>& results, int idx) {
@@ -1558,18 +1604,45 @@ int main(int /*argc*/, char** /*argv*/) {
 
             if (ImGui::BeginMenu("Stats")) {
                 if (doc->data) {
+                    ImGui::Text("Document");
+                    ImGui::Separator();
                     ImGui::TextDisabled("File Size: %s", FormatMemory(doc->size).c_str());
+                    ImGui::TextDisabled("Line Count: %zu", doc->line_offsets.empty() ? 0 : doc->line_offsets.size() - 1);
+                    ImGui::TextDisabled("Max Line Length: %zu chars", doc->max_line_length);
+                    ImGui::Spacing();
+                    ImGui::Text("Performance");
+                    ImGui::Separator();
                     ImGui::TextDisabled("Load Time: %s", FormatTime(doc->load_time_ms).c_str());
                     ImGui::TextDisabled("Parse Time: %s", FormatTime(doc->parse_time_ms).c_str());
                     ImGui::TextDisabled("Index Time: %s", FormatTime(doc->index_time_ms).c_str());
                     if (doc->format_time_ms > 0) ImGui::TextDisabled("Format Time: %s", FormatTime(doc->format_time_ms).c_str());
+                    ImGui::TextDisabled("Application FPS: %.1f", ImGui::GetIO().Framerate);
+                    ImGui::Spacing();
+                    ImGui::Text("Memory");
                     ImGui::Separator();
                     size_t view_mem = doc->data_capacity + doc->line_offsets.capacity() * sizeof(size_t);
-                    ImGui::TextDisabled("View Memory: %s", FormatMemory(view_mem).c_str());
-                    ImGui::TextDisabled("Parse Memory: %s", FormatMemory(doc->parse_memory_bytes).c_str());
+                    ImGui::TextDisabled("View Buffer: %s", FormatMemory(view_mem).c_str());
+                    ImGui::TextDisabled("Parse Arena: %s (%zu Regions)", FormatMemory(doc->parse_memory_bytes).c_str(), GetArenaRegionCount(&doc->main_arena) + GetArenaRegionCount(&doc->scratch_arena));
                     ImGui::TextDisabled("History Memory: %s (%zu Undo, %zu Redo)", FormatMemory(doc->GetHistoryMemoryUsage()).c_str(), doc->undo_stack.size(), doc->redo_stack.size());
+                    ImGui::Spacing();
+
+                    if (doc->root_json) {
+                        ImGui::Text("JSON Tree (AST)");
+                        ImGui::Separator();
+                        ImGui::TextDisabled("Total Nodes: %zu", doc->ast_stats.total_nodes);
+                        ImGui::TextDisabled("Max Depth: %zu", doc->ast_stats.max_depth);
+                        
+                        if (ImGui::BeginTable("ASTBreakdown", 2)) {
+                            ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Objects: %zu", doc->ast_stats.objects); ImGui::TableNextColumn(); ImGui::TextDisabled("Arrays: %zu", doc->ast_stats.arrays);
+                            ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Strings: %zu", doc->ast_stats.strings); ImGui::TableNextColumn(); ImGui::TextDisabled("Numbers: %zu", doc->ast_stats.numbers);
+                            ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Booleans: %zu", doc->ast_stats.booleans); ImGui::TableNextColumn(); ImGui::TextDisabled("Nulls: %zu", doc->ast_stats.nulls);
+                            ImGui::EndTable();
+                        }
+                    }
                 } else {
                     ImGui::TextDisabled("No file loaded.");
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Application FPS: %.1f", ImGui::GetIO().Framerate);
                 }
                 ImGui::EndMenu();
             }
