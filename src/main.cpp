@@ -214,6 +214,7 @@ int main(int /*argc*/, char** /*argv*/) {
     int inline_edit_cursor_pos = -1;
 
     char jsonpath_buf[256] = "";
+    char jsonpath_last_buf[256] = "";
     std::vector<std::vector<JsonValue*>> jsonpath_results;
     int jsonpath_active_idx = -1;
 
@@ -446,6 +447,7 @@ int main(int /*argc*/, char** /*argv*/) {
             } else {
                 inline_edit_line = -1;
             }
+            jsonpath_last_buf[0] = '\0'; // Refresh JSONPath when file loads
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -872,6 +874,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 JumpToMatch(search_results[search_active_idx]);
             }
             search_dirty = false;
+            jsonpath_last_buf[0] = '\0'; // Refresh JSONPath when AST structure updates
         }
 
         if (!doc->data && !doc_loading && !doc_saving && !doc_formatting) {
@@ -923,7 +926,9 @@ int main(int /*argc*/, char** /*argv*/) {
                 float input_w = ImGui::GetContentRegionAvail().x - 180.0f;
                 if (input_w < 100.0f) input_w = 100.0f;
                 ImGui::SetNextItemWidth(input_w);
-                if (ImGui::InputText("##jsonpath_tree", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                bool enter_pressed = ImGui::InputText("##jsonpath_tree", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue);
+                if (strcmp(jsonpath_last_buf, jsonpath_buf) != 0) {
+                    strcpy(jsonpath_last_buf, jsonpath_buf);
                     jsonpath_results.clear();
                     jsonpath_active_idx = -1;
                     if (doc->root_json && jsonpath_buf[0] != '\0') {
@@ -935,6 +940,11 @@ int main(int /*argc*/, char** /*argv*/) {
                             ApplyJsonPathResult();
                         }
                     }
+                } else if (enter_pressed) {
+                    if (!jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
+                        ApplyJsonPathResult();
+                    }
                 }
                 if (jsonpath_results.empty()) {
                     if (jsonpath_buf[0] != '\0') {
@@ -943,8 +953,15 @@ int main(int /*argc*/, char** /*argv*/) {
                     }
                 } else {
                     ImGui::SameLine();
+                    float text_start_x = ImGui::GetCursorPosX();
                     ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    
+                    char max_text[64];
+                    snprintf(max_text, sizeof(max_text), "%d / %d", (int)jsonpath_results.size(), (int)jsonpath_results.size());
+                    float max_text_w = ImGui::CalcTextSize(max_text).x;
+                    
                     ImGui::SameLine();
+                    ImGui::SetCursorPosX(text_start_x + max_text_w + ImGui::GetStyle().ItemSpacing.x);
                     if (ImGui::Button("<##jp_t")) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
@@ -997,7 +1014,9 @@ int main(int /*argc*/, char** /*argv*/) {
                 float input_w = ImGui::GetContentRegionAvail().x - 180.0f;
                 if (input_w < 100.0f) input_w = 100.0f;
                 ImGui::SetNextItemWidth(input_w);
-                if (ImGui::InputText("##jsonpath_graph", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                bool enter_pressed = ImGui::InputText("##jsonpath_graph", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue);
+                if (strcmp(jsonpath_last_buf, jsonpath_buf) != 0) {
+                    strcpy(jsonpath_last_buf, jsonpath_buf);
                     jsonpath_results.clear();
                     jsonpath_active_idx = -1;
                     if (doc->root_json && jsonpath_buf[0] != '\0') {
@@ -1009,6 +1028,11 @@ int main(int /*argc*/, char** /*argv*/) {
                             ApplyJsonPathResult();
                         }
                     }
+                } else if (enter_pressed) {
+                    if (!jsonpath_results.empty()) {
+                        jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
+                        ApplyJsonPathResult();
+                    }
                 }
                 if (jsonpath_results.empty()) {
                     if (jsonpath_buf[0] != '\0') {
@@ -1017,8 +1041,15 @@ int main(int /*argc*/, char** /*argv*/) {
                     }
                 } else {
                     ImGui::SameLine();
+                    float text_start_x = ImGui::GetCursorPosX();
                     ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
+                    
+                    char max_text[64];
+                    snprintf(max_text, sizeof(max_text), "%d / %d", (int)jsonpath_results.size(), (int)jsonpath_results.size());
+                    float max_text_w = ImGui::CalcTextSize(max_text).x;
+                    
                     ImGui::SameLine();
+                    ImGui::SetCursorPosX(text_start_x + max_text_w + ImGui::GetStyle().ItemSpacing.x);
                     if (ImGui::Button("<##jp_g")) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
