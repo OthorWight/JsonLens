@@ -253,6 +253,10 @@ struct AppSettings {
     bool use_tabs = false;
     int indent_size = 2;
     int pagination_size = 2000;
+    int default_view = 0; // 0 = Text, 1 = Tree, 2 = Graph
+    int window_width = 1280;
+    int window_height = 720;
+    bool window_maximized = false;
 
     std::string GetSettingsPath() {
         char* pref_path = SDL_GetPrefPath("JsonLens", "JsonLens");
@@ -295,6 +299,10 @@ struct AppSettings {
             use_tabs = json_get_bool(root, "use_tabs", false);
             indent_size = (int)json_get_number(root, "indent_size", 2.0);
             pagination_size = (int)json_get_number(root, "pagination_size", 2000.0);
+            default_view = (int)json_get_number(root, "default_view", 0.0);
+            window_width = (int)json_get_number(root, "window_width", 1280.0);
+            window_height = (int)json_get_number(root, "window_height", 720.0);
+            window_maximized = json_get_bool(root, "window_maximized", false);
         }
         arena_free(&arena);
         arena_free(&scratch);
@@ -321,6 +329,10 @@ struct AppSettings {
         json_add_bool(&arena, root, "use_tabs", use_tabs);
         json_add_number(&arena, root, "indent_size", (double)indent_size);
         json_add_number(&arena, root, "pagination_size", (double)pagination_size);
+        json_add_number(&arena, root, "default_view", (double)default_view);
+        json_add_number(&arena, root, "window_width", (double)window_width);
+        json_add_number(&arena, root, "window_height", (double)window_height);
+        json_add_bool(&arena, root, "window_maximized", window_maximized);
 
         char* str = json_to_string(&arena, root, true, false, 4, false); // Internal settings never need comments
         if (str) {
@@ -1215,6 +1227,9 @@ int main(int /*argc*/, char** /*argv*/) {
         return -1;
     }
 
+    AppSettings settings;
+    settings.Load();
+
     const char* glsl_version = "#version 130";
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -1222,7 +1237,10 @@ int main(int /*argc*/, char** /*argv*/) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window* window = SDL_CreateWindow("JsonLens - Dear ImGui", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    SDL_Window* window = SDL_CreateWindow("JsonLens - Dear ImGui", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, settings.window_width, settings.window_height, window_flags);
+    if (settings.window_maximized) {
+        SDL_MaximizeWindow(window);
+    }
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1);
@@ -1247,8 +1265,6 @@ int main(int /*argc*/, char** /*argv*/) {
     LargeTextFile* doc = new LargeTextFile();
     char filepath_buffer[512] = "";
 
-    AppSettings settings;
-    settings.Load();
     io.FontGlobalScale = settings.zoom;
 
     std::atomic<bool> doc_loading{false};
@@ -1258,8 +1274,8 @@ int main(int /*argc*/, char** /*argv*/) {
     std::thread doc_thread;
 
     enum class ActiveView { Text, Tree, Graph };
-    ActiveView active_view = ActiveView::Text;
-    bool force_graph_tab = false;
+    ActiveView active_view = (ActiveView)settings.default_view;
+    bool force_graph_tab = (settings.default_view == 2);
 
     bool show_search_bar = false;
     char search_buf[256] = "";
@@ -1271,8 +1287,8 @@ int main(int /*argc*/, char** /*argv*/) {
     int scroll_to_line_frames = 0;
     int highlight_line = -1;
     double highlight_time = 0.0;
-    bool force_text_tab = false;
-    bool force_tree_tab = false;
+    bool force_text_tab = (settings.default_view == 0);
+    bool force_tree_tab = (settings.default_view == 1);
     std::vector<JsonValue*> tree_focus_path;
     int tree_focus_frames = 0;
     JsonValue* tree_highlight_val = nullptr;
@@ -2264,6 +2280,14 @@ int main(int /*argc*/, char** /*argv*/) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
     }
+
+    settings.default_view = (int)active_view;
+    Uint32 current_flags = SDL_GetWindowFlags(window);
+    settings.window_maximized = (current_flags & SDL_WINDOW_MAXIMIZED) != 0;
+    if (!settings.window_maximized) {
+        SDL_GetWindowSize(window, &settings.window_width, &settings.window_height);
+    }
+    settings.Save();
 
     if (doc_thread.joinable()) doc_thread.join();
     delete doc;
