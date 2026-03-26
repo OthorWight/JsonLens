@@ -99,6 +99,7 @@ int main(int /*argc*/, char** /*argv*/) {
     std::vector<char> inline_edit_buf;
     bool inline_edit_focus = false;
     bool inline_edit_needs_refresh = false;
+    int inline_edit_cursor_pos = -1;
 
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
@@ -289,6 +290,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 memcpy(inline_edit_buf.data(), doc->data + start, len);
                 inline_edit_buf[len] = '\0';
                 inline_edit_focus = true;
+                inline_edit_cursor_pos = 0;
             } else {
                 inline_edit_line = -1;
             }
@@ -842,7 +844,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 active_view = ActiveView::Text;
                 force_text_tab = false;
                 
-                auto SwitchToLineEdit = [&](int line_idx) {
+                auto SwitchToLineEdit = [&](int line_idx, int cursor_pos = -1) {
                     if (line_idx < 0 || line_idx >= (int)doc->line_offsets.size()) return;
                     inline_edit_line = line_idx;
                     size_t start = doc->line_offsets[inline_edit_line];
@@ -856,6 +858,9 @@ int main(int /*argc*/, char** /*argv*/) {
                     memcpy(inline_edit_buf.data(), doc->data + start, len);
                     inline_edit_buf[len] = '\0';
                     inline_edit_focus = true;
+                    
+                    if (cursor_pos != -1) inline_edit_cursor_pos = cursor_pos;
+                    if (inline_edit_cursor_pos > (int)len) inline_edit_cursor_pos = (int)len;
                     
                     doc->select_start = doc->select_end = (size_t)-1;
                 };
@@ -971,6 +976,24 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
 
                         static bool is_selecting_text = false;
+                        
+                        if (ImGui::IsMouseReleased(0) && is_selecting_text) {
+                            if (doc->select_start == doc->select_end) {
+                                size_t offset = doc->select_start;
+                                int clicked_line = doc->GetLineFromOffset(offset);
+                                int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);
+                                if (inline_edit_line != clicked_line) {
+                                    if (!inline_edit_needs_refresh) {
+                                        SwitchToLineEdit(clicked_line, cursor_pos);
+                                    }
+                                } else {
+                                    inline_edit_focus = true;
+                                    inline_edit_cursor_pos = cursor_pos;
+                                }
+                            }
+                            is_selecting_text = false;
+                        }
+
                         if (!ImGui::IsMouseDown(0)) {
                             is_selecting_text = false;
                         }
@@ -979,18 +1002,19 @@ int main(int /*argc*/, char** /*argv*/) {
                             if (ImGui::IsMouseClicked(0)) {
                                 size_t offset = GetOffsetFromMouse();
                                 int clicked_line = doc->GetLineFromOffset(offset);
-                                if (inline_edit_line != clicked_line) {
+                                doc->select_start = doc->select_end = offset;
+                                is_selecting_text = true;
+                                int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);
+
+                                if (inline_edit_line != -1 && inline_edit_line != clicked_line) {
                                     if (ApplyInlineEdit()) {
                                         inline_edit_line = clicked_line;
                                         inline_edit_needs_refresh = true;
+                                        inline_edit_cursor_pos = cursor_pos;
                                     } else {
-                                        SwitchToLineEdit(clicked_line);
+                                        inline_edit_line = -1;
                                     }
-                                } else {
-                                    inline_edit_focus = true;
                                 }
-                                doc->select_start = doc->select_end = offset;
-                                is_selecting_text = true;
                             }
                         } else if (ImGui::IsMouseClicked(0)) {
                             is_selecting_text = false;
@@ -998,6 +1022,11 @@ int main(int /*argc*/, char** /*argv*/) {
                         
                         if (ImGui::IsMouseDown(0) && is_selecting_text) {
                             doc->select_end = GetOffsetFromMouse();
+                            if (doc->select_start != doc->select_end && inline_edit_line != -1) {
+                                ApplyInlineEdit();
+                                inline_edit_line = -1;
+                                inline_edit_needs_refresh = false;
+                            }
                         }
 
                         if (ImGui::IsWindowFocused() && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) {
@@ -1092,8 +1121,27 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
                                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                                     
-                                    ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue;
-                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags);
+                                    struct EditState {
+                                        int* p_cursor;
+                                        int current_cursor;
+                                    };
+                                    EditState edit_state;
+                                    edit_state.p_cursor = &inline_edit_cursor_pos;
+                                    edit_state.current_cursor = 0;
+
+                                    ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways;
+                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags,
+                                        [](ImGuiInputTextCallbackData* data) -> int {
+                                            EditState* s = (EditState*)data->UserData;
+                                            if (*s->p_cursor >= 0) {
+                                                data->CursorPos = *s->p_cursor;
+                                                data->SelectionStart = *s->p_cursor;
+                                                data->SelectionEnd = *s->p_cursor;
+                                                *s->p_cursor = -1;
+                                            }
+                                            s->current_cursor = data->CursorPos;
+                                            return 0;
+                                        }, &edit_state);
                                     bool deactivated = ImGui::IsItemDeactivated();
                                     
                                     bool move_up = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_UpArrow);
@@ -1109,6 +1157,12 @@ int main(int /*argc*/, char** /*argv*/) {
                                         if (move_up && inline_edit_line > 0) target_line--;
                                         else if ((move_down || enter_pressed) && inline_edit_line < (int)doc->line_offsets.size() - 1) target_line++;
                                         
+                                        if (move_up || move_down) {
+                                            inline_edit_cursor_pos = edit_state.current_cursor;
+                                        } else {
+                                            inline_edit_cursor_pos = 0;
+                                        }
+
                                         if (ApplyInlineEdit()) {
                                             inline_edit_line = target_line;
                                             inline_edit_needs_refresh = true;
