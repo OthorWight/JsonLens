@@ -53,7 +53,6 @@ void *arena_alloc_fallback(Arena *a, size_t size);
 void *arena_alloc_zero(Arena *a, size_t size);
 void arena_reset(Arena *a);
 void arena_free(Arena *a);
-void arena_print_stats(const Arena *a);
 
 static inline void *arena_alloc(Arena *a, size_t size) {
     if (size == 0) return NULL;
@@ -126,28 +125,12 @@ struct JsonNode {
 
 JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len, int flags, JsonError *err);
 JsonValue *json_get(JsonValue *obj, const char *key);
-JsonValue *json_at(JsonValue *arr, int index);
-void json_print(JsonValue *v, int indent);
 char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments);
 
-/* --- Iteration Macros --- */
-#define json_array_foreach(node, arr) \
-    for (size_t i = 0; (arr) && i < (arr)->as.list.count && (node = &(arr)->as.list.items[i]); i++)
-
-#define json_object_foreach(node, obj) \
-    for (size_t i = 0; (obj) && i < (obj)->as.list.count && (node = &(obj)->as.list.items[i]); i++)
-
 /* --- New QoL & Mutation API --- */
-bool        json_is_type(JsonValue *v, JsonType type);
 double      json_get_number(JsonValue *obj, const char *key, double fallback);
 const char* json_get_string(JsonValue *obj, const char *key, const char *fallback);
 bool        json_get_bool(JsonValue *obj, const char *key, bool fallback);
-JsonValue* json_get_case(JsonValue *obj, const char *key);
-void        json_remove_from_object(JsonValue *obj, const char *key);
-void        json_remove_from_array(JsonValue *arr, size_t index);
-JsonValue* json_clone(Arena *dest_arena, JsonValue *src);
-void       json_replace_in_object(Arena *a, JsonValue *obj, const char *key, JsonValue *new_val);
-JsonValue* json_detach_from_object(Arena *a, JsonValue *obj, const char *key);
 
 /* --- Builder API --- */
 JsonValue *json_create_null(Arena *a);
@@ -161,13 +144,9 @@ void json_add(Arena *a, JsonValue *obj, const char *key, JsonValue *val);
 void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val);
 void json_add_number(Arena *a, JsonValue *obj, const char *key, double val);
 void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val);
-void json_add_null(Arena *a, JsonValue *obj, const char *key);
 
 void json_append(Arena *a, JsonValue *arr, JsonValue *val);
 void json_append_string(Arena *a, JsonValue *arr, const char *val);
-void json_append_number(Arena *a, JsonValue *arr, double val);
-void json_append_bool(Arena *a, JsonValue *arr, bool val);
-void json_append_null(Arena *a, JsonValue *arr);
 
 #ifdef __cplusplus
 }
@@ -281,18 +260,6 @@ void arena_free(Arena *a) {
     }
     a->begin = NULL;
     a->end = NULL;
-}
-
-void arena_print_stats(const Arena *a) {
-    size_t total_cap = 0, used = 0, count = 0;
-    ArenaRegion *curr = a->begin;
-    while (curr) {
-        total_cap += curr->capacity;
-        used += curr->count;
-        count++;
-        curr = curr->next;
-    }
-    printf("Arena: %zu regions, %zu/%zu bytes used\n", count, used, total_cap);
 }
 
 ArenaTemp arena_temp_begin(Arena *a) {
@@ -1128,44 +1095,7 @@ JsonValue *json_get(JsonValue *obj, const char *key) {
     return NULL;
 }
 
-JsonValue *json_at(JsonValue *arr, int index) {
-    if (!arr || arr->type != JSON_ARRAY || index < 0) return NULL;
-    if ((size_t)index >= arr->as.list.count) return NULL;
-    return &arr->as.list.items[index].value;
-}
-
-void json_print(JsonValue *v, int indent) {
-    if (!v) return;
-    for (int i=0; i<indent; i++) printf("  ");
-    switch (v->type) {
-        case JSON_NULL:   printf("null\n"); break;
-        case JSON_BOOL:   printf("%s\n", v->as.boolean ? "true" : "false"); break;
-        case JSON_NUMBER: printf("%g\n", v->as.number); break;
-        case JSON_STRING: printf("\"%s\"\n", v->as.string); break;
-        case JSON_ARRAY:
-            printf("[\n");
-            for (size_t i = 0; i < v->as.list.count; i++) json_print(&v->as.list.items[i].value, indent + 1);
-            for (int i=0; i<indent; i++) printf("  ");
-            printf("]\n");
-            break;
-        case JSON_OBJECT:
-            printf("{\n");
-            for (size_t i = 0; i < v->as.list.count; i++) {
-                for (int j=0; j<indent+1; j++) printf("  ");
-                printf("\"%s\":\n", v->as.list.items[i].key);
-                json_print(&v->as.list.items[i].value, indent + 2);
-            }
-            for (int i=0; i<indent; i++) printf("  ");
-            printf("}\n");
-            break;
-    }
-}
-
 /* --- New QoL Implementations --- */
-
-bool json_is_type(JsonValue *v, JsonType type) {
-    return (v && v->type == type);
-}
 
 double json_get_number(JsonValue *obj, const char *key, double fallback) {
     JsonValue *v = json_get(obj, key);
@@ -1180,126 +1110,6 @@ const char* json_get_string(JsonValue *obj, const char *key, const char *fallbac
 bool json_get_bool(JsonValue *obj, const char *key, bool fallback) {
     JsonValue *v = json_get(obj, key);
     return (v && v->type == JSON_BOOL) ? v->as.boolean : fallback;
-}
-
-JsonValue* json_get_case(JsonValue *obj, const char *key) {
-    if (!obj || obj->type != JSON_OBJECT) return NULL;
-    for (size_t i = 0; i < obj->as.list.count; i++) {
-        if (strcasecmp(obj->as.list.items[i].key, key) == 0) {
-            return &obj->as.list.items[i].value;
-        }
-    }
-    return NULL;
-}
-
-void json_remove_from_object(JsonValue *obj, const char *key) {
-    if (!obj || obj->type != JSON_OBJECT) return;
-    for (size_t i = 0; i < obj->as.list.count; i++) {
-        if (strcmp(obj->as.list.items[i].key, key) == 0) {
-            size_t items_to_move = obj->as.list.count - i - 1;
-            if (items_to_move > 0) {
-                memmove(&obj->as.list.items[i], &obj->as.list.items[i+1], items_to_move * sizeof(JsonNode));
-            }
-            obj->as.list.count--;
-            return;
-        }
-    }
-}
-
-void json_remove_from_array(JsonValue *arr, size_t index) {
-    if (!arr || arr->type != JSON_ARRAY || index >= arr->as.list.count) return;
-    size_t items_to_move = arr->as.list.count - index - 1;
-    if (items_to_move > 0) {
-        memmove(&arr->as.list.items[index], &arr->as.list.items[index+1], items_to_move * sizeof(JsonNode));
-    }
-    arr->as.list.count--;
-}
-
-
-/* Detach: Removes the node and returns a pointer to a copy of the value in the Arena. */
-JsonValue* json_detach_from_object(Arena *a, JsonValue *obj, const char *key) {
-    if (!obj || obj->type != JSON_OBJECT || !key || !a) return NULL;
-    
-    for (size_t i = 0; i < obj->as.list.count; i++) {
-        if (strcmp(obj->as.list.items[i].key, key) == 0) {
-            JsonValue *detached = (JsonValue *)arena_alloc(a, sizeof(JsonValue));
-            if (detached) *detached = obj->as.list.items[i].value;
-            
-            size_t items_to_move = obj->as.list.count - i - 1;
-            if (items_to_move > 0) {
-                memmove(&obj->as.list.items[i], &obj->as.list.items[i+1], items_to_move * sizeof(JsonNode));
-            }
-            obj->as.list.count--;
-            return detached;
-        }
-    }
-    return NULL;
-}
-
-/* Replace: Finds a key and swaps the value. If key doesn't exist, it adds it. */
-void json_replace_in_object(Arena *a, JsonValue *obj, const char *key, JsonValue *new_val) {
-    if (!obj || obj->type != JSON_OBJECT || !key || !new_val) return;
-    
-    for (size_t i = 0; i < obj->as.list.count; i++) {
-        if (strcmp(obj->as.list.items[i].key, key) == 0) {
-            obj->as.list.items[i].value = *new_val;
-            return;
-        }
-    }
-    json_add(a, obj, key, new_val);
-}
-
-JsonValue* json_clone(Arena *dest_arena, JsonValue *src) {
-    if (!src) return NULL;
-    JsonValue *new_val = arena_alloc_struct(dest_arena, JsonValue);
-    new_val->type = src->type;
-    new_val->offset = src->offset;
-
-    new_val->pre_comment = src->pre_comment ? arena_alloc_array(dest_arena, char, strlen(src->pre_comment) + 1) : NULL;
-    if (new_val->pre_comment) strcpy(new_val->pre_comment, src->pre_comment);
-    
-    new_val->post_comment = src->post_comment ? arena_alloc_array(dest_arena, char, strlen(src->post_comment) + 1) : NULL;
-    if (new_val->post_comment) strcpy(new_val->post_comment, src->post_comment);
-
-    new_val->trailing_comment = src->trailing_comment ? arena_alloc_array(dest_arena, char, strlen(src->trailing_comment) + 1) : NULL;
-    if (new_val->trailing_comment) strcpy(new_val->trailing_comment, src->trailing_comment);
-
-    switch (src->type) {
-        case JSON_NUMBER: new_val->as.number = src->as.number; break;
-        case JSON_BOOL:   new_val->as.boolean = src->as.boolean; break;
-        case JSON_STRING: {
-            size_t len = strlen(src->as.string);
-            new_val->as.string = arena_alloc_array(dest_arena, char, len + 1);
-            memcpy(new_val->as.string, src->as.string, len + 1);
-            break;
-        }
-        case JSON_ARRAY:
-        case JSON_OBJECT: {
-            new_val->as.list.count = src->as.list.count;
-            new_val->as.list.items = arena_alloc_array(dest_arena, JsonNode, src->as.list.count);
-            for (size_t i = 0; i < src->as.list.count; i++) {
-                if (src->type == JSON_OBJECT) {
-                    size_t klen = strlen(src->as.list.items[i].key);
-                    new_val->as.list.items[i].key = arena_alloc_array(dest_arena, char, klen + 1);
-                    memcpy(new_val->as.list.items[i].key, src->as.list.items[i].key, klen + 1);
-                } else {
-                    new_val->as.list.items[i].key = NULL;
-                }
-                if (src->as.list.items[i].pre_comment) {
-                    size_t clen = strlen(src->as.list.items[i].pre_comment);
-                    new_val->as.list.items[i].pre_comment = arena_alloc_array(dest_arena, char, clen + 1);
-                    strcpy(new_val->as.list.items[i].pre_comment, src->as.list.items[i].pre_comment);
-                } else {
-                    new_val->as.list.items[i].pre_comment = NULL;
-                }
-                JsonValue *cloned_sub = json_clone(dest_arena, &src->as.list.items[i].value);
-                new_val->as.list.items[i].value = *cloned_sub;
-            }
-            break;
-        }
-        default: break;
-    }
-    return new_val;
 }
 
 /* --- Serialization Builders --- */
@@ -1609,12 +1419,6 @@ void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
     bool_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &bool_val);
 }
-void json_add_null(Arena *a, JsonValue *obj, const char *key) {
-    JsonValue null_val; null_val.type = JSON_NULL;
-    null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
-    null_val.trailing_comment = NULL;
-    json_list_append(a, obj, key, &null_val);
-}
 
 void json_append(Arena *a, JsonValue *arr, JsonValue *val) {
     if (arr && val && arr->type == JSON_ARRAY) json_list_append(a, arr, NULL, val);
@@ -1629,24 +1433,6 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
         json_list_append(a, arr, NULL, &str_val);
     }
-}
-void json_append_number(Arena *a, JsonValue *arr, double val) {
-    JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
-    num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
-    num_val.trailing_comment = NULL;
-    json_list_append(a, arr, NULL, &num_val);
-}
-void json_append_bool(Arena *a, JsonValue *arr, bool val) {
-    JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
-    bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
-    bool_val.trailing_comment = NULL;
-    json_list_append(a, arr, NULL, &bool_val);
-}
-void json_append_null(Arena *a, JsonValue *arr) {
-    JsonValue null_val; null_val.type = JSON_NULL;
-    null_val.pre_comment = NULL; null_val.post_comment = NULL; null_val.offset = 0;
-    null_val.trailing_comment = NULL;
-    json_list_append(a, arr, NULL, &null_val);
 }
 
 #endif /* ARENA_JSON_IMPLEMENTATION */
