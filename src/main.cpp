@@ -21,6 +21,9 @@
 #include "document.h"
 
 int main(int /*argc*/, char** /*argv*/) {
+    // Prefer Wayland natively on Linux, fallback to X11
+    SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         return -1;
     }
