@@ -98,6 +98,7 @@ int main(int /*argc*/, char** /*argv*/) {
     int inline_edit_line = -1;
     std::vector<char> inline_edit_buf;
     bool inline_edit_focus = false;
+    bool inline_edit_needs_refresh = false;
 
     auto JumpToLine = [&](int line) {
         if (line < 0) return;
@@ -253,8 +254,15 @@ int main(int /*argc*/, char** /*argv*/) {
     };
 
     bool done = false;
+    bool was_formatting = false;
     while (!done) {
         bool zoom_changed = false;
+        bool current_formatting = doc_formatting.load();
+        if (was_formatting && !current_formatting) {
+            if (inline_edit_line >= 0) inline_edit_needs_refresh = true;
+        }
+        was_formatting = current_formatting;
+
         bool focus_search = false;
         bool focus_replace = false;
         
@@ -269,10 +277,21 @@ int main(int /*argc*/, char** /*argv*/) {
             delete doc;
             doc = ready_doc;
             error_fix_line = -1;
-            inline_edit_line = -1;
-        }
-        if (doc_formatting) {
-            inline_edit_line = -1;
+            if (doc->line_offsets.size() > 0 && doc->data) {
+                inline_edit_line = 0;
+                size_t start = doc->line_offsets[0];
+                size_t end = (1 < doc->line_offsets.size()) ? doc->line_offsets[1] : doc->size;
+                size_t text_end = end;
+                if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                size_t len = text_end - start;
+                inline_edit_buf.resize(len + 8192);
+                memcpy(inline_edit_buf.data(), doc->data + start, len);
+                inline_edit_buf[len] = '\0';
+                inline_edit_focus = true;
+            } else {
+                inline_edit_line = -1;
+            }
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -822,6 +841,50 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginTabItem("Text View", nullptr, text_tab_flags)) {
                 active_view = ActiveView::Text;
                 force_text_tab = false;
+                
+                auto SwitchToLineEdit = [&](int line_idx) {
+                    if (line_idx < 0 || line_idx >= (int)doc->line_offsets.size()) return;
+                    inline_edit_line = line_idx;
+                    size_t start = doc->line_offsets[inline_edit_line];
+                    size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
+                    size_t text_end = end;
+                    if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                    if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                    size_t len = text_end - start;
+                    
+                    inline_edit_buf.resize(len + 8192);
+                    memcpy(inline_edit_buf.data(), doc->data + start, len);
+                    inline_edit_buf[len] = '\0';
+                    inline_edit_focus = true;
+                    
+                    doc->select_start = doc->select_end = (size_t)-1;
+                };
+
+                auto ApplyInlineEdit = [&]() -> bool {
+                    if (inline_edit_line >= 0 && inline_edit_line < (int)doc->line_offsets.size()) {
+                        size_t start = doc->line_offsets[inline_edit_line];
+                        size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
+                        size_t text_end = end;
+                        if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                        if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                        std::string original_text(doc->data + start, text_end - start);
+                        if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
+                            doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
+                            doc->ClearAstHistory();
+                            doc_formatting = true;
+                            bool allow_comments = settings.allow_comments;
+                            if (doc_thread.joinable()) doc_thread.join();
+                            doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
+                                doc->RebuildTreeFromText(allow_comments); 
+                                doc_formatting = false; 
+                                search_dirty = true; 
+                            });
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
                 ImGui::BeginChild("TextChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
                 // If the DOM was edited, trigger the text regeneration in a background thread
                 if (doc->tree_dirty && !doc_loading && !doc_saving && !doc_formatting) {
@@ -844,6 +907,11 @@ int main(int /*argc*/, char** /*argv*/) {
                                       "Updating view... Please wait.";
                     ImGui::TextDisabled("%s", msg);
                 } else {
+                    if (inline_edit_needs_refresh) {
+                        SwitchToLineEdit(inline_edit_line);
+                        inline_edit_needs_refresh = false;
+                    }
+
                     if (doc->data) {
                         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Ensure monospace if loaded
                         
@@ -908,26 +976,20 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
 
                         if (ImGui::IsWindowHovered() && !is_mouse_over_scrollbars && !ImGui::IsAnyItemHovered()) {
-                            if (ImGui::IsMouseDoubleClicked(0)) {
+                            if (ImGui::IsMouseClicked(0)) {
                                 size_t offset = GetOffsetFromMouse();
-                                inline_edit_line = doc->GetLineFromOffset(offset);
-                                
-                                size_t start = doc->line_offsets[inline_edit_line];
-                                size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
-                                size_t text_end = end;
-                                if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
-                                if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
-                                size_t len = text_end - start;
-                                
-                                inline_edit_buf.resize(len + 8192); // Provide space for edits
-                                memcpy(inline_edit_buf.data(), doc->data + start, len);
-                                inline_edit_buf[len] = '\0';
-                                inline_edit_focus = true;
-                                
-                                doc->select_start = doc->select_end = (size_t)-1;
-                                is_selecting_text = false;
-                            } else if (ImGui::IsMouseClicked(0)) {
-                                doc->select_start = doc->select_end = GetOffsetFromMouse();
+                                int clicked_line = doc->GetLineFromOffset(offset);
+                                if (inline_edit_line != clicked_line) {
+                                    if (ApplyInlineEdit()) {
+                                        inline_edit_line = clicked_line;
+                                        inline_edit_needs_refresh = true;
+                                    } else {
+                                        SwitchToLineEdit(clicked_line);
+                                    }
+                                } else {
+                                    inline_edit_focus = true;
+                                }
+                                doc->select_start = doc->select_end = offset;
                                 is_selecting_text = true;
                             }
                         } else if (ImGui::IsMouseClicked(0)) {
@@ -1030,46 +1092,34 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
                                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                                     
-                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+                                    ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue;
+                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags);
                                     bool deactivated = ImGui::IsItemDeactivated();
+                                    
+                                    bool move_up = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_UpArrow);
+                                    bool move_down = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_DownArrow);
                                     
                                     ImGui::PopStyleVar();
                                     ImGui::PopStyleColor();
                                     ImGui::PopItemWidth();
                                     ImGui::PopID();
                                     
-                                    if (enter_pressed) {
-                                        doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
-                                        doc->ClearAstHistory();
-                                        doc_formatting = true;
-                                        bool allow_comments = settings.allow_comments;
-                                        if (doc_thread.joinable()) doc_thread.join();
-                                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
-                                            doc->RebuildTreeFromText(allow_comments); 
-                                            doc_formatting = false; 
-                                            search_dirty = true; 
-                                        });
-                                        inline_edit_line = -1;
+                                    if (enter_pressed || move_up || move_down) {
+                                        int target_line = inline_edit_line;
+                                        if (move_up && inline_edit_line > 0) target_line--;
+                                        else if ((move_down || enter_pressed) && inline_edit_line < (int)doc->line_offsets.size() - 1) target_line++;
+                                        
+                                        if (ApplyInlineEdit()) {
+                                            inline_edit_line = target_line;
+                                            inline_edit_needs_refresh = true;
+                                        } else {
+                                            SwitchToLineEdit(target_line);
+                                        }
                                     } else if (deactivated) {
                                         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                                             inline_edit_line = -1;
                                         } else {
-                                            size_t text_end = end;
-                                            if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
-                                            std::string original_text(doc->data + start, text_end - start);
-                                            if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
-                                                doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
-                                                doc->ClearAstHistory();
-                                                doc_formatting = true;
-                                                bool allow_comments = settings.allow_comments;
-                                                if (doc_thread.joinable()) doc_thread.join();
-                                                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
-                                                    doc->RebuildTreeFromText(allow_comments); 
-                                                    doc_formatting = false; 
-                                                    search_dirty = true; 
-                                                });
-                                            }
-                                            inline_edit_line = -1;
+                                            ApplyInlineEdit();
                                         }
                                     }
                                 } else {
