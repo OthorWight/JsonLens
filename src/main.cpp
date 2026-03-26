@@ -24,6 +24,8 @@ int main(int /*argc*/, char** /*argv*/) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         return -1;
     }
+    
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
     AppSettings settings;
     settings.Load();
@@ -275,7 +277,15 @@ int main(int /*argc*/, char** /*argv*/) {
             if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) done = true;
             
             if (event.type == SDL_DROPFILE && event.drop.file != nullptr) {
-                LoadFile(event.drop.file);
+                std::string file_path = event.drop.file;
+                
+                // Fix for some Linux Desktop Environments improperly prepending "file://"
+                if (file_path.find("file://") == 0) file_path = file_path.substr(7);
+                
+                // Strip any trailing newlines or carriage returns
+                while (!file_path.empty() && (file_path.back() == '\n' || file_path.back() == '\r')) file_path.pop_back();
+                
+                LoadFile(file_path);
                 SDL_free(event.drop.file);
             }
         }
