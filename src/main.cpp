@@ -273,6 +273,11 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) done = true;
             if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) done = true;
+            
+            if (event.type == SDL_DROPFILE && event.drop.file != nullptr) {
+                LoadFile(event.drop.file);
+                SDL_free(event.drop.file);
+            }
         }
 
         if (LargeTextFile* ready_doc = doc_ready.exchange(nullptr)) {
