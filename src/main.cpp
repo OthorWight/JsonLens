@@ -936,18 +936,21 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
                     }
                 }
-                ImGui::SameLine();
                 if (jsonpath_results.empty()) {
-                    if (jsonpath_buf[0] != '\0') ImGui::TextDisabled("0 results");
+                    if (jsonpath_buf[0] != '\0') {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("0 results");
+                    }
                 } else {
+                    ImGui::SameLine();
                     ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
                     ImGui::SameLine();
-                    if (ImGui::Button("<##jp_t") && !jsonpath_results.empty()) {
+                    if (ImGui::Button("<##jp_t")) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(">##jp_t") && !jsonpath_results.empty()) {
+                    if (ImGui::Button(">##jp_t")) {
                         jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
                         ApplyJsonPathResult();
                     }
@@ -1007,18 +1010,21 @@ int main(int /*argc*/, char** /*argv*/) {
                         }
                     }
                 }
-                ImGui::SameLine();
                 if (jsonpath_results.empty()) {
-                    if (jsonpath_buf[0] != '\0') ImGui::TextDisabled("0 results");
+                    if (jsonpath_buf[0] != '\0') {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("0 results");
+                    }
                 } else {
+                    ImGui::SameLine();
                     ImGui::Text("%d / %d", jsonpath_active_idx + 1, (int)jsonpath_results.size());
                     ImGui::SameLine();
-                    if (ImGui::Button("<##jp_g") && !jsonpath_results.empty()) {
+                    if (ImGui::Button("<##jp_g")) {
                         jsonpath_active_idx = (jsonpath_active_idx > 0) ? jsonpath_active_idx - 1 : (int)jsonpath_results.size() - 1;
                         ApplyJsonPathResult();
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button(">##jp_g") && !jsonpath_results.empty()) {
+                    if (ImGui::Button(">##jp_g")) {
                         jsonpath_active_idx = (jsonpath_active_idx < (int)jsonpath_results.size() - 1) ? jsonpath_active_idx + 1 : 0;
                         ApplyJsonPathResult();
                     }
