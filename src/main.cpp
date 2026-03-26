@@ -2096,7 +2096,15 @@ int main(int /*argc*/, char** /*argv*/) {
                             return (size_t)(s - doc->data);
                         };
 
-                        if (ImGui::IsWindowHovered()) {
+                        bool is_mouse_over_scrollbars = false;
+                        ImVec2 mouse_pos = ImGui::GetMousePos();
+                        ImVec2 win_pos = ImGui::GetWindowPos();
+                        ImVec2 content_max = ImGui::GetWindowContentRegionMax();
+                        if (mouse_pos.x >= win_pos.x + content_max.x || mouse_pos.y >= win_pos.y + content_max.y) {
+                            is_mouse_over_scrollbars = true;
+                        }
+
+                        if (ImGui::IsWindowHovered() && !is_mouse_over_scrollbars) {
                             if (ImGui::IsMouseDoubleClicked(0)) {
                                 size_t offset = GetOffsetFromMouse();
                                 inline_edit_line = doc->GetLineFromOffset(offset);
@@ -2118,7 +2126,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                 doc->select_start = doc->select_end = GetOffsetFromMouse();
                             }
                         }
-                        if (ImGui::IsMouseDown(0) && doc->select_start != (size_t)-1 && (ImGui::IsWindowHovered() || ImGui::IsWindowFocused())) {
+                        if (ImGui::IsMouseDown(0) && doc->select_start != (size_t)-1 && !ImGui::IsAnyItemActive() && (ImGui::IsWindowHovered() || ImGui::IsWindowFocused())) {
                             doc->select_end = GetOffsetFromMouse();
                         }
 
