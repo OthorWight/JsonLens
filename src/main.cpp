@@ -2318,9 +2318,22 @@ int main(int /*argc*/, char** /*argv*/) {
                                         } else if (isalpha(*p)) {
                                             col = col_bool;
                                             while (p < end_ptr && isalpha(*p)) p++;
-                                        } else if (*p == '/' && p + 1 < end_ptr && *(p+1) == '/') {
-                                            col = col_comm;
-                                            p = end_ptr; // Rest of line is a comment
+                                        } else if (*p == '/' && p + 1 < end_ptr) {
+                                            if (*(p+1) == '/') {
+                                                col = col_comm;
+                                                p = end_ptr; // Rest of line is a comment
+                                            } else if (*(p+1) == '*') {
+                                                col = col_comm;
+                                                const char* end_comment = p + 2;
+                                                while (end_comment < end_ptr) {
+                                                    if (*end_comment == '*' && (end_comment + 1 < end_ptr) && *(end_comment + 1) == '/') {
+                                                        p = end_comment + 2;
+                                                        break;
+                                                    }
+                                                    end_comment++;
+                                                }
+                                                if (end_comment >= end_ptr) { p = end_ptr; }
+                                            } else { col = col_punc; p++; }
                                         } else {
                                             col = col_punc;
                                             p++;
