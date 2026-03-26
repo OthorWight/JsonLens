@@ -2316,7 +2316,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                     }
                                     
                                     if (first) ImGui::TextUnformatted("");
-                                    else ImGui::NewLine();
                                 }
                             }
                         }
