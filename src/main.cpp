@@ -145,7 +145,7 @@ int main(int /*argc*/, char** /*argv*/) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     SDL_Window* window = SDL_CreateWindow("JsonLens - Dear ImGui", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, settings.window_width, settings.window_height, window_flags);
     if (settings.window_maximized) {
         SDL_MaximizeWindow(window);
@@ -288,7 +288,7 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
-    auto LoadFile = [&](std::string path) {
+    auto LoadFile = [&](const std::string& path) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
@@ -317,7 +317,7 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
-    auto SaveFile = [&](std::string path) {
+    auto SaveFile = [&](const std::string& path) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
@@ -417,7 +417,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 std::string file_path = event.drop.file;
                 
                 // Fix for some Linux Desktop Environments improperly prepending "file://"
-                if (file_path.find("file://") == 0) file_path = file_path.substr(7);
+                if (file_path.compare(0, 7, "file://") == 0) file_path = file_path.substr(7);
                 
                 // Strip any trailing newlines or carriage returns
                 while (!file_path.empty() && (file_path.back() == '\n' || file_path.back() == '\r')) file_path.pop_back();
@@ -928,7 +928,8 @@ int main(int /*argc*/, char** /*argv*/) {
                 ImGui::SetNextItemWidth(input_w);
                 bool enter_pressed = ImGui::InputText("##jsonpath_tree", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue);
                 if (strcmp(jsonpath_last_buf, jsonpath_buf) != 0) {
-                    strcpy(jsonpath_last_buf, jsonpath_buf);
+                    strncpy(jsonpath_last_buf, jsonpath_buf, sizeof(jsonpath_last_buf) - 1);
+                    jsonpath_last_buf[sizeof(jsonpath_last_buf) - 1] = '\0';
                     jsonpath_results.clear();
                     jsonpath_active_idx = -1;
                     if (doc->root_json && jsonpath_buf[0] != '\0') {
@@ -1027,7 +1028,8 @@ int main(int /*argc*/, char** /*argv*/) {
                 ImGui::SetNextItemWidth(input_w);
                 bool enter_pressed = ImGui::InputText("##jsonpath_graph", jsonpath_buf, sizeof(jsonpath_buf), ImGuiInputTextFlags_EnterReturnsTrue);
                 if (strcmp(jsonpath_last_buf, jsonpath_buf) != 0) {
-                    strcpy(jsonpath_last_buf, jsonpath_buf);
+                    strncpy(jsonpath_last_buf, jsonpath_buf, sizeof(jsonpath_last_buf) - 1);
+                    jsonpath_last_buf[sizeof(jsonpath_last_buf) - 1] = '\0';
                     jsonpath_results.clear();
                     jsonpath_active_idx = -1;
                     if (doc->root_json && jsonpath_buf[0] != '\0') {
@@ -1094,9 +1096,9 @@ int main(int /*argc*/, char** /*argv*/) {
                         doc->ClearGraph();
                         int node_count = 0;
                         doc->graph_root = BuildGraphNode(doc, doc->root_json, "Root", 0, node_count);
-                        float current_y = 40.0f;
-                        float max_x = 0.0f;
                         if (doc->graph_root) {
+                            float current_y = 40.0f;
+                            float max_x = 0.0f;
                             LayoutGraphNode(doc->graph_root, 0, current_y, max_x);
                             doc->graph_total_width = max_x + 100.0f;
                             doc->graph_total_height = current_y + 40.0f;
@@ -1267,7 +1269,7 @@ int main(int /*argc*/, char** /*argv*/) {
                             const char* end = doc->data + line_end;
                             float current_x = 0.0f;
                             
-                            ImFont* font = ImGui::GetFont();
+                            const ImFont* font = ImGui::GetFont();
                             const float scale = font_size / font->FontSize;
                             
                             while (s < end) {
@@ -1457,7 +1459,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways;
                                     bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags,
                                         [](ImGuiInputTextCallbackData* data) -> int {
-                                            EditState* s = (EditState*)data->UserData;
+                                            EditState* s = static_cast<EditState*>(data->UserData);
                                             if (*s->p_cursor >= 0) {
                                                 data->CursorPos = *s->p_cursor;
                                                 data->SelectionStart = *s->p_cursor;
@@ -1497,8 +1499,8 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImVec4 col_punc(0.60f, 0.60f, 0.60f, 1.0f);
                                     ImVec4 col_comm(0.40f, 0.70f, 0.40f, 1.0f);
 
-                                    ImFont* font = ImGui::GetFont();
-                                    float font_size = ImGui::GetFontSize();
+                                    const ImFont* font = ImGui::GetFont();
+                                    float local_font_size = ImGui::GetFontSize();
 
                                     while (p < end_ptr) {
                                         const char* token_start = p;
@@ -1546,8 +1548,8 @@ int main(int /*argc*/, char** /*argv*/) {
                                         }
                                         
                                         if (p > token_start) {
-                                            draw_list->AddText(font, font_size, current_pos, ImGui::ColorConvertFloat4ToU32(col), token_start, p);
-                                            current_pos.x += font->CalcTextSizeA(font_size, FLT_MAX, -1.0f, token_start, p, NULL).x;
+                                            draw_list->AddText(font, local_font_size, current_pos, ImGui::ColorConvertFloat4ToU32(col), token_start, p);
+                                            current_pos.x += font->CalcTextSizeA(local_font_size, FLT_MAX, -1.0f, token_start, p, NULL).x;
                                         }
                                     }
 
@@ -1559,9 +1561,9 @@ int main(int /*argc*/, char** /*argv*/) {
                                             last_cursor_time = ImGui::GetTime();
                                         }
                                         if (fmod(ImGui::GetTime() - last_cursor_time, 1.0) < 0.5) {
-                                            float cursor_x = font->CalcTextSizeA(font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + edit_state.current_cursor, NULL).x;
+                                            float cursor_x = font->CalcTextSizeA(local_font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + edit_state.current_cursor, NULL).x;
                                             ImVec2 p1 = ImVec2(text_pos.x + cursor_x, text_pos.y);
-                                            ImVec2 p2 = ImVec2(p1.x, p1.y + font_size);
+                                            ImVec2 p2 = ImVec2(p1.x, p1.y + local_font_size);
                                             draw_list->AddLine(p1, p2, ImGui::ColorConvertFloat4ToU32(orig_text_col), 1.0f);
                                         }
                                     }

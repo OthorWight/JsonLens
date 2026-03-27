@@ -18,9 +18,9 @@ struct AppSettings {
     int window_height = 720;
     bool window_maximized = false;
 
-    std::string GetSettingsPath();
+    static std::string GetSettingsPath();
     void Load();
-    void Save();
+    void Save() const;
     void AddRecentFile(std::string path);
 };
 

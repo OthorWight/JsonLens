@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 
 std::string AppSettings::GetSettingsPath() {
     char* pref_path = SDL_GetPrefPath("JsonLens", "JsonLens");
@@ -17,18 +18,24 @@ void AppSettings::Load() {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return;
     fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
+    long fsize = ftell(f);
+    if (fsize <= 0) { fclose(f); return; }
+    size_t size = (size_t)fsize;
     fseek(f, 0, SEEK_SET);
-    char* data = (char*)malloc(size + 1);
-    fread(data, 1, size, f);
-    data[size] = '\0';
+    char* data = static_cast<char*>(malloc(size + 1));
+    if (!data) {
+        fclose(f);
+        return;
+    }
+    size_t bytes_read = fread(data, 1, size, f);
+    data[bytes_read] = '\0';
     fclose(f);
 
     Arena arena, scratch;
     arena_init(&arena);
     arena_init(&scratch);
     JsonError err;
-    JsonValue* root = json_parse(&arena, &scratch, data, size, JSON_PARSE_ALLOW_COMMENTS, &err);
+    JsonValue* root = json_parse(&arena, &scratch, data, bytes_read, JSON_PARSE_ALLOW_COMMENTS, &err);
     if (root && root->type == JSON_OBJECT) {
         zoom = (float)json_get_number(root, "zoom", 1.0);
         JsonValue* recents = json_get(root, "recent_files");
@@ -56,7 +63,7 @@ void AppSettings::Load() {
     free(data);
 }
 
-void AppSettings::Save() {
+void AppSettings::Save() const {
     std::string path = GetSettingsPath();
     Arena arena;
     arena_init(&arena);
@@ -80,7 +87,7 @@ void AppSettings::Save() {
     json_add_number(&arena, root, "window_height", (double)window_height);
     json_add_bool(&arena, root, "window_maximized", window_maximized);
 
-    char* str = json_to_string(&arena, root, true, false, 4, false);
+    const char* str = json_to_string(&arena, root, true, false, 4, false);
     if (str) {
         FILE* f = fopen(path.c_str(), "wb");
         if (f) { fwrite(str, 1, strlen(str), f); fclose(f); }
@@ -89,11 +96,9 @@ void AppSettings::Save() {
 }
 
 void AppSettings::AddRecentFile(std::string path) {
-    for (auto it = recent_files.begin(); it != recent_files.end(); ++it) {
-        if (*it == path) {
-            recent_files.erase(it);
-            break;
-        }
+    auto it = std::find(recent_files.begin(), recent_files.end(), path);
+    if (it != recent_files.end()) {
+        recent_files.erase(it);
     }
     recent_files.insert(recent_files.begin(), std::move(path));
     if (recent_files.size() > 10) recent_files.resize(10);

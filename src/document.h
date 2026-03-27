@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <numeric>
 #include <algorithm>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,7 +91,7 @@ inline void JsonInsertAtIndex(Arena* a, JsonValue* parent, size_t index, const J
     if (!a || !parent || (parent->type != JSON_OBJECT && parent->type != JSON_ARRAY)) return;
     if (index > parent->as.list.count) index = parent->as.list.count;
     size_t old_count = parent->as.list.count;
-    JsonNode* new_items = (JsonNode*)arena_alloc(a, (old_count + 1) * sizeof(JsonNode));
+    JsonNode* new_items = static_cast<JsonNode*>(arena_alloc(a, (old_count + 1) * sizeof(JsonNode)));
     if (index > 0) memcpy(new_items, parent->as.list.items, index * sizeof(JsonNode));
     if (index < old_count) memcpy(new_items + index + 1, parent->as.list.items + index, (old_count - index) * sizeof(JsonNode));
     new_items[index] = node;
@@ -150,6 +151,9 @@ struct LargeTextFile {
         arena_free(&scratch_arena);
     }
 
+    LargeTextFile(const LargeTextFile&) = delete;
+    LargeTextFile& operator=(const LargeTextFile&) = delete;
+
     void BuildLineOffsets() {
         line_offsets.clear();
         if (!data) return;
@@ -162,7 +166,7 @@ struct LargeTextFile {
             size_t chunk = (remain > 4096) ? 4096 : remain;
             const void* p = memchr(data + start, '\n', chunk);
             if (p) {
-                size_t next_start = (size_t)((const char*)p - data) + 1;
+                size_t next_start = static_cast<size_t>(static_cast<const char*>(p) - data) + 1;
                 size_t len = next_start - start - 1;
                 if (len > max_len) max_len = len;
                 line_offsets.push_back(next_start);
@@ -217,11 +221,13 @@ struct LargeTextFile {
         size_t total = 0;
         for (const auto& r : undo_stack) {
             total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
-            for (const auto& d : r.text_deltas) total += d.old_str.capacity() + d.new_str.capacity();
+            total += std::accumulate(r.text_deltas.begin(), r.text_deltas.end(), (size_t)0,
+                                     [](size_t acc, const TextReplaceDelta& d) { return acc + d.old_str.capacity() + d.new_str.capacity(); });
         }
         for (const auto& r : redo_stack) {
             total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
-            for (const auto& d : r.text_deltas) total += d.old_str.capacity() + d.new_str.capacity();
+            total += std::accumulate(r.text_deltas.begin(), r.text_deltas.end(), (size_t)0,
+                                     [](size_t acc, const TextReplaceDelta& d) { return acc + d.old_str.capacity() + d.new_str.capacity(); });
         }
         return total;
     }
@@ -249,12 +255,20 @@ struct LargeTextFile {
         FILE* f = fopen(filepath, "rb");
         if (!f) return;
         fseek(f, 0, SEEK_END);
-        size = ftell(f);
+        long fsize = ftell(f);
+        if (fsize < 0) { fclose(f); return; }
+        size = (size_t)fsize;
         fseek(f, 0, SEEK_SET);
+        if (size > SIZE_MAX - 1024 * 1024) { fclose(f); return; }
         data_capacity = size + 1024 * 1024;
-        data = (char*)malloc(data_capacity);
-        fread(data, 1, size, f);
-        data[size] = '\0';
+        data = static_cast<char*>(malloc(data_capacity));
+        if (data) {
+            size_t bytes_read = fread(data, 1, size, f);
+            data[bytes_read] = '\0';
+            size = bytes_read;
+        } else {
+            size = 0;
+        }
         fclose(f);
 
         Uint64 t1 = SDL_GetPerformanceCounter();
@@ -278,12 +292,13 @@ struct LargeTextFile {
         Uint64 t0 = SDL_GetPerformanceCounter();
         arena_free(&scratch_arena);
         arena_init(&scratch_arena);
-        char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step, keep_comments);
+        const char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step, keep_comments);
         if (new_text) {
             size_t new_len = strlen(new_text);
             if (new_len >= data_capacity) {
                 data_capacity = new_len + 1024 * 1024;
-                data = (char*)realloc(data, data_capacity);
+                char* new_data = static_cast<char*>(realloc(data, data_capacity));
+                if (new_data) data = new_data; else return;
             }
             strcpy(data, new_text);
             size = new_len;
@@ -317,14 +332,14 @@ struct LargeTextFile {
         if (!root_json && rec.action != UndoActionType::TextReplace) return false;
         if (rec.action == UndoActionType::TextReplace) {
             if (is_undo) {
-                long diff = 0;
-                for (const auto& d : rec.text_deltas) diff += (long)d.new_str.length() - (long)d.old_str.length();
+                long diff = std::accumulate(rec.text_deltas.begin(), rec.text_deltas.end(), 0L,
+                                       [](long acc, const TextReplaceDelta& d) { return acc + (long)d.new_str.length() - (long)d.old_str.length(); });
                 for (auto it = rec.text_deltas.rbegin(); it != rec.text_deltas.rend(); ++it) {
                     diff -= (long)it->new_str.length() - (long)it->old_str.length();
                     size_t current_pos = it->pos + diff;
                     size_t old_len = it->new_str.length();
                     size_t new_len = it->old_str.length();
-                    if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; data = (char*)realloc(data, data_capacity); }
+                    if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; char* new_data = static_cast<char*>(realloc(data, data_capacity)); if (new_data) data = new_data; else return false; }
                     memmove(data + current_pos + new_len, data + current_pos + old_len, size - current_pos - old_len);
                     memcpy(data + current_pos, it->old_str.c_str(), new_len);
                     size = size - old_len + new_len;
@@ -336,7 +351,7 @@ struct LargeTextFile {
                     size_t current_pos = d.pos + diff;
                     size_t old_len = d.old_str.length();
                     size_t new_len = d.new_str.length();
-                    if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; data = (char*)realloc(data, data_capacity); }
+                    if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; char* new_data = static_cast<char*>(realloc(data, data_capacity)); if (new_data) data = new_data; else return false; }
                     memmove(data + current_pos + new_len, data + current_pos + old_len, size - current_pos - old_len);
                     memcpy(data + current_pos, d.new_str.c_str(), new_len);
                     size = size - old_len + new_len;
@@ -388,12 +403,11 @@ struct LargeTextFile {
         RecomputeStats();
     }
 
-    // [ReplaceCurrent, ReplaceAll, Undo, Redo, ReplaceLine implementations identical to main.cpp...]
-    void ReplaceCurrent(const char* search_str, const char* replace_str, const std::vector<size_t>& results, int idx) { if (idx < 0 || idx >= (int)results.size()) return; size_t match_pos = results[idx]; size_t search_len = strlen(search_str); size_t replace_len = strlen(replace_str); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; rec.text_deltas.push_back({match_pos, search_str, replace_str}); undo_stack.push_back(rec); redo_stack.clear(); if (size - search_len + replace_len >= data_capacity) { data_capacity = size + replace_len + 1024 * 1024; data = (char*)realloc(data, data_capacity); } memmove(data + match_pos + replace_len, data + match_pos + search_len, size - match_pos - search_len); memcpy(data + match_pos, replace_str, replace_len); size = size - search_len + replace_len; data[size] = '\0'; }
-    void ReplaceAll(const char* search_str, const char* replace_str, const std::vector<size_t>& results) { if (results.empty()) return; size_t search_len = strlen(search_str); size_t replace_len = strlen(replace_str); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; for (size_t match_pos : results) { rec.text_deltas.push_back({match_pos, search_str, replace_str}); } undo_stack.push_back(rec); redo_stack.clear(); if (replace_len <= search_len) { size_t write_pos = results[0]; size_t read_pos = results[0]; size_t diff = search_len - replace_len; size_t total_diff = 0; for (size_t i = 0; i < results.size(); i++) { size_t match_pos = results[i]; size_t chunk_size = match_pos - read_pos; if (chunk_size > 0 && write_pos != read_pos) memmove(data + write_pos, data + read_pos, chunk_size); write_pos += chunk_size; read_pos = match_pos + search_len; memcpy(data + write_pos, replace_str, replace_len); write_pos += replace_len; total_diff += diff; } if (read_pos < size) memmove(data + write_pos, data + read_pos, size - read_pos); size -= total_diff; data[size] = '\0'; } else { size_t diff = replace_len - search_len; size_t new_size = size + results.size() * diff; if (new_size >= data_capacity) { data_capacity = new_size + 1024 * 1024; data = (char*)realloc(data, data_capacity); } size_t read_pos = size, write_pos = new_size; for (int i = (int)results.size() - 1; i >= 0; i--) { size_t match_pos = results[i]; size_t chunk_size = read_pos - (match_pos + search_len); if (chunk_size > 0) { write_pos -= chunk_size; read_pos -= chunk_size; memmove(data + write_pos, data + read_pos, chunk_size); } write_pos -= replace_len; read_pos -= search_len; memcpy(data + write_pos, replace_str, replace_len); } size = new_size; data[size] = '\0'; } }
+    void ReplaceCurrent(const char* search_str, const char* replace_str, const std::vector<size_t>& results, int idx) { if (idx < 0 || idx >= (int)results.size()) return; size_t match_pos = results[idx]; size_t search_len = strlen(search_str); size_t replace_len = strlen(replace_str); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; rec.text_deltas.push_back({match_pos, search_str, replace_str}); undo_stack.push_back(rec); redo_stack.clear(); if (size - search_len + replace_len >= data_capacity) { data_capacity = size + replace_len + 1024 * 1024; char* new_data = static_cast<char*>(realloc(data, data_capacity)); if (!new_data) return; data = new_data; } memmove(data + match_pos + replace_len, data + match_pos + search_len, size - match_pos - search_len); memcpy(data + match_pos, replace_str, replace_len); size = size - search_len + replace_len; data[size] = '\0'; }
+    void ReplaceAll(const char* search_str, const char* replace_str, const std::vector<size_t>& results) { if (results.empty()) return; size_t search_len = strlen(search_str); size_t replace_len = strlen(replace_str); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; for (size_t match_pos : results) { rec.text_deltas.push_back({match_pos, search_str, replace_str}); } undo_stack.push_back(rec); redo_stack.clear(); if (replace_len <= search_len) { size_t write_pos = results[0]; size_t read_pos = results[0]; size_t diff = search_len - replace_len; size_t total_diff = 0; for (size_t i = 0; i < results.size(); i++) { size_t match_pos = results[i]; size_t chunk_size = match_pos - read_pos; if (chunk_size > 0 && write_pos != read_pos) memmove(data + write_pos, data + read_pos, chunk_size); write_pos += chunk_size; read_pos = match_pos + search_len; memcpy(data + write_pos, replace_str, replace_len); write_pos += replace_len; total_diff += diff; } if (read_pos < size) memmove(data + write_pos, data + read_pos, size - read_pos); size -= total_diff; data[size] = '\0'; } else { size_t diff = replace_len - search_len; size_t new_size = size + results.size() * diff; if (new_size >= data_capacity) { data_capacity = new_size + 1024 * 1024; char* new_data = static_cast<char*>(realloc(data, data_capacity)); if (!new_data) return; data = new_data; } size_t read_pos = size, write_pos = new_size; for (int i = (int)results.size() - 1; i >= 0; i--) { size_t match_pos = results[i]; size_t chunk_size = read_pos - (match_pos + search_len); if (chunk_size > 0) { write_pos -= chunk_size; read_pos -= chunk_size; memmove(data + write_pos, data + read_pos, chunk_size); } write_pos -= replace_len; read_pos -= search_len; memcpy(data + write_pos, replace_str, replace_len); } size = new_size; data[size] = '\0'; } }
     bool Undo() { if (undo_stack.empty()) return false; UndoRecord rec = undo_stack.back(); undo_stack.pop_back(); return ExecuteHistoryAction(rec, redo_stack, true); }
     bool Redo() { if (redo_stack.empty()) return false; UndoRecord rec = redo_stack.back(); redo_stack.pop_back(); return ExecuteHistoryAction(rec, undo_stack, false); }
-    void ReplaceLine(int line_idx, const char* new_text) { if (line_idx < 0 || line_idx >= (int)line_offsets.size()) return; size_t start = line_offsets[line_idx]; size_t end = (line_idx + 1 < (int)line_offsets.size()) ? line_offsets[line_idx + 1] : size; size_t text_end = end; if (text_end > start && data[text_end - 1] == '\n') text_end--; if (text_end > start && data[text_end - 1] == '\r') text_end--; size_t old_len = text_end - start; size_t new_len = strlen(new_text); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; rec.text_deltas.push_back({start, std::string(data + start, old_len), std::string(new_text, new_len)}); undo_stack.push_back(std::move(rec)); redo_stack.clear(); if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; data = (char*)realloc(data, data_capacity); } memmove(data + start + new_len, data + start + old_len, size - start - old_len); memcpy(data + start, new_text, new_len); size = size - old_len + new_len; data[size] = '\0'; }
+    void ReplaceLine(int line_idx, const char* new_text) { if (line_idx < 0 || line_idx >= (int)line_offsets.size()) return; size_t start = line_offsets[line_idx]; size_t end = (line_idx + 1 < (int)line_offsets.size()) ? line_offsets[line_idx + 1] : size; size_t text_end = end; if (text_end > start && data[text_end - 1] == '\n') text_end--; if (text_end > start && data[text_end - 1] == '\r') text_end--; size_t old_len = text_end - start; size_t new_len = strlen(new_text); UndoRecord rec{}; rec.action = UndoActionType::TextReplace; rec.text_deltas.push_back({start, std::string(data + start, old_len), std::string(new_text, new_len)}); undo_stack.push_back(std::move(rec)); redo_stack.clear(); if (size - old_len + new_len >= data_capacity) { data_capacity = size + new_len + 1024 * 1024; char* new_data = static_cast<char*>(realloc(data, data_capacity)); if (!new_data) return; data = new_data; } memmove(data + start + new_len, data + start + old_len, size - start - old_len); memcpy(data + start, new_text, new_len); size = size - old_len + new_len; data[size] = '\0'; }
 };
 
 #endif // JSONLENS_DOCUMENT_H

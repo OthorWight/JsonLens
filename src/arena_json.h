@@ -140,12 +140,12 @@ JsonValue *json_create_string(Arena *a, const char *str);
 JsonValue *json_create_array(Arena *a);
 JsonValue *json_create_object(Arena *a);
 
-void json_add(Arena *a, JsonValue *obj, const char *key, JsonValue *val);
+void json_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
 void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val);
 void json_add_number(Arena *a, JsonValue *obj, const char *key, double val);
 void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val);
 
-void json_append(Arena *a, JsonValue *arr, JsonValue *val);
+void json_append(Arena *a, JsonValue *arr, const JsonValue *val);
 void json_append_string(Arena *a, JsonValue *arr, const char *val);
 
 #ifdef __cplusplus
@@ -844,7 +844,7 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
     if (!arr->as.list.items) return false;
     
     size_t write_idx = 0;
-    NodeBlock *b = head;
+    const NodeBlock *b = head;
     while (b) {
         memcpy(&arr->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
         write_idx += b->count;
@@ -975,7 +975,7 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
     if (!obj->as.list.items) return false;
     
     size_t write_idx = 0;
-    NodeBlock *b = head;
+    const NodeBlock *b = head;
     while (b) {
         memcpy(&obj->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
         write_idx += b->count;
@@ -1127,12 +1127,27 @@ static void sb_init(StrBuilder *sb) {
 }
 
 static void sb_append(StrBuilder *sb, const char *str, size_t len) {
-    if (sb->len + len > sb->cap) {
-        while (sb->len + len > sb->cap) sb->cap *= 2;
-        sb->buf = (char *)realloc(sb->buf, sb->cap);
+    if (len > SIZE_MAX - sb->len) return; // Check for total length overflow
+    size_t new_len = sb->len + len;
+    if (new_len > sb->cap) {
+        size_t new_cap = sb->cap;
+        if (new_cap == 0) new_cap = 8192;
+        while (new_len > new_cap) {
+            if (new_cap > SIZE_MAX / 2) {
+                new_cap = SIZE_MAX;
+                break; // Can't grow further
+            }
+            new_cap *= 2;
+        }
+        if (new_len > new_cap) return; // Required size is impossible
+
+        char* new_buf = (char *)realloc(sb->buf, new_cap);
+        if (!new_buf) return; // realloc failed
+        sb->buf = new_buf;
+        sb->cap = new_cap;
     }
     memcpy(sb->buf + sb->len, str, len);
-    sb->len += len;
+    sb->len = new_len;
 }
 
 static void sb_putc(StrBuilder *sb, char c) {
@@ -1368,7 +1383,7 @@ JsonValue *json_create_string(Arena *a, const char *str) {
 JsonValue *json_create_array(Arena *a) { return make_value(a, JSON_ARRAY); }
 JsonValue *json_create_object(Arena *a) { return make_value(a, JSON_OBJECT); }
 
-static void json_list_append(Arena *a, JsonValue *parent, const char *key, JsonValue *val) {
+static void json_list_append(Arena *a, JsonValue *parent, const char *key, const JsonValue *val) {
     if (!a || !parent || !val) return; 
 
     size_t old_count = parent->as.list.count;
@@ -1393,7 +1408,7 @@ static void json_list_append(Arena *a, JsonValue *parent, const char *key, JsonV
     parent->as.list.count = old_count + 1;
 }
 
-void json_add(Arena *a, JsonValue *obj, const char *key, JsonValue *val) {
+void json_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
     if (obj && key && val && obj->type == JSON_OBJECT) json_list_append(a, obj, key, val);
 }
 void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val) {
@@ -1420,7 +1435,7 @@ void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
     json_list_append(a, obj, key, &bool_val);
 }
 
-void json_append(Arena *a, JsonValue *arr, JsonValue *val) {
+void json_append(Arena *a, JsonValue *arr, const JsonValue *val) {
     if (arr && val && arr->type == JSON_ARRAY) json_list_append(a, arr, NULL, val);
 }
 void json_append_string(Arena *a, JsonValue *arr, const char *val) {

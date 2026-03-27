@@ -1,9 +1,9 @@
 #include "views.h"
 #include "document.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <algorithm>
+#include <cstdio>    // For snprintf
+#include <cstdlib>   // For atof
+#include <cstring>   // For strncpy, strcmp
+#include <algorithm> // For std::find
 
 GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string& key, int depth, int& node_count) {
     if (!val || node_count > 100000) return nullptr;
@@ -16,7 +16,10 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
     std::string preview = "";
     if (val->type == JSON_STRING) {
         std::string s = val->as.string ? val->as.string : "";
-        if (s.length() > 20) s = s.substr(0, 17) + "...";
+        if (s.length() > 20) {
+            s.resize(17);
+            s += "...";
+        }
         preview = "\"" + s + "\"";
     }
     else if (val->type == JSON_NUMBER) {
@@ -161,10 +164,16 @@ void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse
     }
 }
 
-int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time, std::string current_string_path) {
+// Globals for managing in-place editing in the tree view to avoid complex state passing
+// through recursion and issues with shared static buffers.
+static void* s_editing_item_ptr = nullptr; // Can point to a JsonValue (for string value)
+static char s_edit_buf[4096] = "";
+static bool s_edit_wants_focus = false;
+
+int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std::vector<size_t>& current_path, const std::vector<JsonValue*>& focus_path, JsonValue* highlight_val, double highlight_time, const std::string& current_string_path) {
+    if (!node) return 0;
     int action = 0;
     JsonValue* val = &node->value;
-    if (!val) return false;
 
     if (node_index >= 0) {
         current_path.push_back((size_t)node_index);
@@ -197,13 +206,17 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
 
     std::string my_path = current_string_path;
     if (node_index >= 0) {
-        if (node->key) {
-            bool valid_identifier = true;
-            if (!isalpha(node->key[0]) && node->key[0] != '_') valid_identifier = false;
-            for (int i = 1; node->key[i]; i++) {
-                if (!isalnum(node->key[i]) && node->key[i] != '_') valid_identifier = false;
+        if (node->key) { // Part of an object
+            bool is_simple_key = false;
+            if (node->key && node->key[0] != '\0') {
+                is_simple_key = (isalpha(node->key[0]) || node->key[0] == '_');
+                for (int i = 1; is_simple_key && node->key[i] != '\0'; i++) {
+                    if (!isalnum(node->key[i]) && node->key[i] != '_') {
+                        is_simple_key = false;
+                    }
+                }
             }
-            if (valid_identifier) {
+            if (is_simple_key) {
                 my_path += ".";
                 my_path += node->key;
             } else {
@@ -211,7 +224,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 my_path += node->key;
                 my_path += "\"]";
             }
-        } else {
+        } else { // Part of an array
             my_path += "[";
             my_path += std::to_string(node_index);
             my_path += "]";
@@ -225,8 +238,9 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         float calc_w = ImGui::CalcTextSize(key_buf).x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
         ImGui::SetNextItemWidth(calc_w < 30.0f ? 30.0f : calc_w);
         if (ImGui::InputText("##key", key_buf, sizeof(key_buf), ImGuiInputTextFlags_NoHorizontalScroll)) {
-            node->key = (char*)arena_alloc(&doc->main_arena, strlen(key_buf) + 1);
-            strcpy(node->key, key_buf);
+            size_t key_len = strlen(key_buf);
+            node->key = static_cast<char*>(arena_alloc(&doc->main_arena, key_len + 1));
+            memcpy(node->key, key_buf, key_len + 1);
             action |= 1;
         }
         if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
@@ -255,26 +269,46 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             break;
         }
         case JSON_STRING: {
-            static char str_buf[4096];
-            strncpy(str_buf, val->as.string ? val->as.string : "", sizeof(str_buf) - 1);
-            str_buf[sizeof(str_buf) - 1] = '\0';
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::InputText("##val", str_buf, sizeof(str_buf))) {
-                val->as.string = (char*)arena_alloc(&doc->main_arena, strlen(str_buf) + 1);
-                strcpy(val->as.string, str_buf);
-                action |= 1;
+            if (s_editing_item_ptr == val) {
+                if (s_edit_wants_focus) { ImGui::SetKeyboardFocusHere(); s_edit_wants_focus = false; }
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (ImGui::InputText("##val", s_edit_buf, sizeof(s_edit_buf), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                    if (strcmp(s_edit_buf, val->as.string ? val->as.string : "") != 0) {
+                        doc->PushUndo(UndoActionType::SetNode, current_path, *node);
+                        size_t edit_len = strlen(s_edit_buf);
+                        val->as.string = static_cast<char*>(arena_alloc(&doc->main_arena, edit_len + 1));
+                        memcpy(val->as.string, s_edit_buf, edit_len + 1);
+                        action |= 1;
+                    }
+                    s_editing_item_ptr = nullptr;
+                } else if (ImGui::IsItemDeactivated()) {
+                    if (strcmp(s_edit_buf, val->as.string ? val->as.string : "") != 0) {
+                        doc->PushUndo(UndoActionType::SetNode, current_path, *node);
+                        size_t edit_len = strlen(s_edit_buf);
+                        val->as.string = static_cast<char*>(arena_alloc(&doc->main_arena, edit_len + 1));
+                        memcpy(val->as.string, s_edit_buf, edit_len + 1);
+                        action |= 1;
+                    }
+                    s_editing_item_ptr = nullptr;
+                }
+            } else {
+                ImGui::Text("\"%s\"", val->as.string ? val->as.string : "");
+                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+                if (ImGui::IsItemClicked() && s_editing_item_ptr == nullptr) {
+                    s_editing_item_ptr = val;
+                    strncpy(s_edit_buf, val->as.string ? val->as.string : "", sizeof(s_edit_buf) - 1);
+                    s_edit_buf[sizeof(s_edit_buf) - 1] = '\0';
+                    s_edit_wants_focus = true;
+                }
             }
-            if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
             ApplyFocusTarget();
             break;
         }
         case JSON_NUMBER: {
             ImGui::SetNextItemWidth(-FLT_MIN);
             const char* format = (val->as.number == (int64_t)val->as.number) ? "%.0f" : "%.17g";
-            if (ImGui::InputDouble("##val", &val->as.number, 0.0, 0.0, format)) {
-                action |= 1;
-            }
-            if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node);
+            if (ImGui::IsItemActivated()) doc->PushUndo(UndoActionType::SetNode, current_path, *node); // Before edit
+            if (ImGui::InputDouble("##val", &val->as.number, 0.0, 0.0, format)) action |= 1; // After edit
             ApplyFocusTarget();
             break;
         }
@@ -313,7 +347,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         }
         if (ImGui::MenuItem("Copy Value")) {
             Arena temp; arena_init(&temp);
-            char* str = json_to_string(&temp, val, true, false, 4, false);
+            const char* str = json_to_string(&temp, val, true, false, 4, false);
             if (str) ImGui::SetClipboardText(str);
             arena_free(&temp);
         }
@@ -340,7 +374,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
                 if (in_focus_path && focus_path.size() > 1 && actual_val != nullptr) {
                     auto it = std::find(focus_path.begin(), focus_path.end(), actual_val);
                     if (it != focus_path.end() && (it + 1) != focus_path.end()) {
-                        JsonValue* next_in_path = *(it + 1);
+                        const JsonValue* next_in_path = *(it + 1);
                         for (size_t i = chunk_start; i < chunk_end; i++) {
                             if (&val->as.list.items[i].value == next_in_path) {
                                 chunk_has_focus = true; break;
@@ -352,7 +386,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
 
                 char chunk_label[64];
                 snprintf(chunk_label, sizeof(chunk_label), is_obj ? "{...} [%zu - %zu]" : "[...] [%zu - %zu]", chunk_start, chunk_end - 1);
-                show_chunk = ImGui::TreeNodeEx((void*)(uintptr_t)chunk_start, ImGuiTreeNodeFlags_SpanAvailWidth, "%s", chunk_label);
+                show_chunk = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<uintptr_t>(chunk_start)), ImGuiTreeNodeFlags_SpanAvailWidth, "%s", chunk_label);
             }
             
             if (show_chunk) {

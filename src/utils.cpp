@@ -1,7 +1,6 @@
 #include "utils.h"
 #include "arena_json.h"
-#include <stdio.h>
-#include <stdlib.h>
+#include <cstdio>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -10,7 +9,7 @@
 
 size_t GetArenaRegionCount(const Arena* a) {
     size_t count = 0;
-    ArenaRegion* curr = a->begin;
+    const ArenaRegion* curr = a->begin;
     while (curr) {
         count++;
         curr = curr->next;
@@ -20,7 +19,7 @@ size_t GetArenaRegionCount(const Arena* a) {
 
 size_t GetArenaMemoryUsage(const Arena* a) {
     size_t total = 0;
-    ArenaRegion* curr = a->begin;
+    const ArenaRegion* curr = a->begin;
     while (curr) {
         total += curr->capacity + sizeof(ArenaRegion);
         curr = curr->next;
@@ -56,6 +55,21 @@ std::string FormatMemory(size_t bytes) {
     return std::string(buf);
 }
 
+namespace {
+std::string EscapeShellArg(const std::string& arg) {
+    std::string escaped = "'";
+    for (char c : arg) {
+        if (c == '\'') {
+            escaped += "'\\''";
+        } else {
+            escaped += c;
+        }
+    }
+    escaped += "'";
+    return escaped;
+}
+} // namespace
+
 std::string ShowOpenFileDialog(const std::string& default_dir) {
 #ifdef _WIN32
     char filename[MAX_PATH] = {0};
@@ -75,12 +89,12 @@ std::string ShowOpenFileDialog(const std::string& default_dir) {
     std::string result = "";
 #ifdef __APPLE__
     std::string cmd = "osascript -e 'POSIX path of (choose file";
-    if (!default_dir.empty()) cmd += " default location \"" + default_dir + "\"";
+    if (!default_dir.empty()) cmd += " default location " + EscapeShellArg(default_dir);
     cmd += ")' 2>/dev/null";
     FILE* pipe = popen(cmd.c_str(), "r");
 #else
     std::string cmd = "zenity --file-selection --title=\"Open JSON\" --file-filter=\"*.json\"";
-    if (!default_dir.empty()) cmd += " --filename=\"" + default_dir + "/\"";
+    if (!default_dir.empty()) cmd += " --filename=" + EscapeShellArg(default_dir + "/");
     cmd += " 2>/dev/null";
     FILE* pipe = popen(cmd.c_str(), "r");
 #endif
@@ -92,7 +106,6 @@ std::string ShowOpenFileDialog(const std::string& default_dir) {
     pclose(pipe);
     return result;
 #endif
-    return "";
 }
 
 std::string ShowSaveFileDialog() {
@@ -124,5 +137,4 @@ std::string ShowSaveFileDialog() {
     pclose(pipe);
     return result;
 #endif
-    return "";
 }
