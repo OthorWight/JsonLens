@@ -55,6 +55,7 @@ std::string FormatMemory(size_t bytes) {
     return std::string(buf);
 }
 
+#ifndef _WIN32
 namespace {
 std::string EscapeShellArg(const std::string& arg) {
     std::string escaped = "'";
@@ -69,6 +70,7 @@ std::string EscapeShellArg(const std::string& arg) {
     return escaped;
 }
 } // namespace
+#endif
 
 std::string ShowOpenFileDialog(const std::string& default_dir) {
 #ifdef _WIN32
@@ -84,6 +86,7 @@ std::string ShowOpenFileDialog(const std::string& default_dir) {
     ofn.lpstrDefExt = "json";
     if (!default_dir.empty()) ofn.lpstrInitialDir = default_dir.c_str();
     if (GetOpenFileNameA(&ofn)) return std::string(filename);
+    return "";
 #else
     char buffer[1024];
     std::string result = "";
@@ -121,6 +124,7 @@ std::string ShowSaveFileDialog() {
     ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
     ofn.lpstrDefExt = "json";
     if (GetSaveFileNameA(&ofn)) return std::string(filename);
+    return "";
 #else
     char buffer[1024];
     std::string result = "";
