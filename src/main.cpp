@@ -1248,11 +1248,11 @@ int main(int /*argc*/, char** /*argv*/) {
                         float char_width = ImGui::CalcTextSize("A").x;
                         ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
                         
-                        auto GetOffsetFromMouse = [&]() -> size_t {
+                        auto GetOffsetFromPos = [&](ImVec2 pos) -> size_t {
                             if (doc->line_offsets.empty()) return 0;
                             
-                            double local_mouse_y = (double)ImGui::GetMousePos().y - (double)text_start_pos.y;
-                            int raw_line_idx = (int)(local_mouse_y / (double)exact_item_height);
+                            double local_y = (double)pos.y - (double)text_start_pos.y;
+                            int raw_line_idx = (int)(local_y / (double)exact_item_height);
                             
                             if (raw_line_idx < 0) raw_line_idx = 0;
                             size_t line_idx = (size_t)raw_line_idx;
@@ -1262,8 +1262,8 @@ int main(int /*argc*/, char** /*argv*/) {
                             if (line_end > line_start && doc->data[line_end - 1] == '\n') line_end--;
                             if (line_end > line_start && doc->data[line_end - 1] == '\r') line_end--;
                             
-                            float local_mouse_x = ImGui::GetMousePos().x - text_start_pos.x;
-                            if (local_mouse_x <= 0.0f) return line_start;
+                            float local_x = pos.x - text_start_pos.x;
+                            if (local_x <= 0.0f) return line_start;
                             
                             const char* s = doc->data + line_start;
                             const char* end = doc->data + line_end;
@@ -1279,12 +1279,22 @@ int main(int /*argc*/, char** /*argv*/) {
                                 
                                 if (c != '\r') {
                                     float c_width = font->GetCharAdvance((ImWchar)c) * scale;
-                                    if (current_x + c_width * 0.5f > local_mouse_x) break;
+                                    if (current_x + c_width * 0.5f > local_x) break;
                                     current_x += c_width;
                                 }
                                 s += bytes;
                             }
                             return (size_t)(s - doc->data);
+                        };
+
+                        auto GetOffsetFromLineAndX = [&](int line_idx, float screen_x) -> size_t {
+                            if (line_idx < 0 || line_idx >= (int)doc->line_offsets.size()) return 0;
+                            ImVec2 fake_pos(screen_x, text_start_pos.y + (float)line_idx * exact_item_height + exact_item_height * 0.5f);
+                            return GetOffsetFromPos(fake_pos);
+                        };
+
+                        auto GetOffsetFromMouse = [&]() -> size_t {
+                            return GetOffsetFromPos(ImGui::GetMousePos());
                         };
 
                         bool is_mouse_over_scrollbars = false;
@@ -1471,14 +1481,24 @@ int main(int /*argc*/, char** /*argv*/) {
                                         }, &edit_state);
                                     bool deactivated = ImGui::IsItemDeactivated();
                                     
+                                    ImVec2 item_min = ImGui::GetItemRectMin();
+                                    ImVec2 item_max = ImGui::GetItemRectMax();
+
+                                    bool is_active = ImGui::IsItemActive();
+                                    bool drag_outside = false;
+                                    if (is_active && ImGui::IsMouseDragging(0)) {
+                                        ImVec2 mouse_pos = ImGui::GetMousePos();
+                                        if (mouse_pos.y < item_min.y || mouse_pos.y > item_max.y) {
+                                            drag_outside = true;
+                                        }
+                                    }
+                                    
                                     bool move_up = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_UpArrow);
                                     bool move_down = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_DownArrow);
                                     
                                     ImGui::PopStyleColor(); // Pop Transparent Text
 
                                     // Render custom highlighted text
-                                    ImVec2 item_min = ImGui::GetItemRectMin();
-                                    ImVec2 item_max = ImGui::GetItemRectMax();
                                     ImGuiID id = ImGui::GetID("##inline_edit");
                                     ImGuiInputTextState* state = ImGui::GetInputTextState(id);
                                     float scroll_x = state ? state->ScrollX : 0.0f;
@@ -1575,7 +1595,15 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImGui::PopItemWidth();
                                     ImGui::PopID();
                                     
-                                    if (enter_pressed || move_up || move_down) {
+                                    if (drag_outside) {
+                                        int clicked_line = inline_edit_line;
+                                        ApplyInlineEdit();
+                                        inline_edit_line = -1;
+                                        inline_edit_needs_refresh = false;
+                                        is_selecting_text = true;
+                                        doc->select_start = GetOffsetFromLineAndX(clicked_line, ImGui::GetIO().MouseClickedPos[0].x);
+                                        doc->select_end = GetOffsetFromMouse();
+                                    } else if (enter_pressed || move_up || move_down) {
                                         int target_line = inline_edit_line;
                                         if (move_up && inline_edit_line > 0) target_line--;
                                         else if ((move_down || enter_pressed) && inline_edit_line < (int)doc->line_offsets.size() - 1) target_line++;
