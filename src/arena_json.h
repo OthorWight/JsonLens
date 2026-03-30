@@ -25,6 +25,10 @@
 
 typedef struct ArenaRegion ArenaRegion;
 
+#ifdef __cplusplus
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 struct ArenaRegion {
     ArenaRegion *next;
     size_t capacity;
@@ -32,6 +36,9 @@ struct ArenaRegion {
     size_t _padding; 
     uint8_t data[];
 };
+#ifdef __cplusplus
+#pragma GCC diagnostic pop
+#endif
 
 typedef struct Arena {
     ArenaRegion *begin;
