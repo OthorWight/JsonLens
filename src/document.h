@@ -293,6 +293,11 @@ struct LargeTextFile {
         BuildLineOffsets();
         Uint64 t5 = SDL_GetPerformanceCounter();
         index_time_ms = (double)(t5 - t4) * 1000.0 / t_freq;
+        
+        // Free the scratch arena to release its high-water mark capacity back to the OS
+        arena_free(&scratch_arena);
+        arena_init(&scratch_arena);
+        
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
         RecomputeStats();
     }
@@ -320,6 +325,11 @@ struct LargeTextFile {
             Uint64 t3 = SDL_GetPerformanceCounter();
             index_time_ms = (double)(t3 - t2) * 1000.0 / t_freq;
         }
+        
+        // Free the scratch arena since the serialized string has been copied
+        arena_free(&scratch_arena);
+        arena_init(&scratch_arena);
+        
         tree_dirty = false;
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
     }
@@ -411,6 +421,11 @@ struct LargeTextFile {
         BuildLineOffsets(); ClearGraph(); tree_dirty = false; graph_dirty = true;
         Uint64 t1 = SDL_GetPerformanceCounter();
         parse_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
+        
+        // Free temporary parsing memory
+        arena_free(&scratch_arena);
+        arena_init(&scratch_arena);
+        
         parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
         RecomputeStats();
     }
