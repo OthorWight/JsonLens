@@ -209,9 +209,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
     int inline_edit_line = -1;
     std::vector<char> inline_edit_buf;
-    bool inline_edit_focus = false;
     bool inline_edit_needs_refresh = false;
     int inline_edit_cursor_pos = -1;
+    bool inline_edit_dirty = false;
+    bool text_dirty = false;
 
     char jsonpath_buf[256] = "";
     char jsonpath_last_buf[256] = "";
@@ -288,7 +289,79 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
-    auto LoadFile = [&](const std::string& path) {
+    auto SwitchToLineEdit = [&](int line_idx, int cursor_pos = -1) {
+        if (doc->line_offsets.empty()) return;
+        if (line_idx < 0) line_idx = 0;
+        if (line_idx >= (int)doc->line_offsets.size()) line_idx = (int)doc->line_offsets.size() - 1;
+        inline_edit_line = line_idx;
+        size_t start = doc->line_offsets[inline_edit_line];
+        size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
+        size_t text_end = end;
+        if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+        if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+        size_t len = text_end - start;
+        
+        inline_edit_buf.resize(len + 8192);
+        memcpy(inline_edit_buf.data(), doc->data + start, len);
+        inline_edit_buf[len] = '\0';
+        
+        if (cursor_pos != -1) inline_edit_cursor_pos = cursor_pos;
+        if (inline_edit_cursor_pos > (int)len) inline_edit_cursor_pos = (int)len;
+        
+        inline_edit_dirty = false;
+        doc->select_start = doc->select_end = (size_t)-1;
+    };
+
+    auto ApplyInlineEdit = [&]() -> bool {
+        if (inline_edit_line >= 0 && inline_edit_line < (int)doc->line_offsets.size() && inline_edit_dirty) {
+            size_t start = doc->line_offsets[inline_edit_line];
+            size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
+            size_t text_end = end;
+            if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+            if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+            std::string original_text(doc->data + start, text_end - start);
+            if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
+                doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
+                doc->ClearAstHistory();
+                text_dirty = true;
+                inline_edit_dirty = false;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto PerformUndo = [&]() {
+        ApplyInlineEdit();
+        if (doc->Undo()) {
+            doc->ClearAstHistory();
+            text_dirty = true;
+            inline_edit_line = -1;
+            if (!doc->redo_stack.empty() && doc->redo_stack.back().action == UndoActionType::TextReplace && !doc->redo_stack.back().text_deltas.empty()) {
+                doc->select_start = doc->redo_stack.back().text_deltas.front().pos;
+                doc->select_end = doc->select_start + doc->redo_stack.back().text_deltas.front().old_str.length();
+            } else {
+                doc->select_start = doc->select_end = (size_t)-1;
+            }
+        }
+    };
+
+    auto PerformRedo = [&]() {
+        ApplyInlineEdit();
+        if (doc->Redo()) {
+            doc->ClearAstHistory();
+            text_dirty = true;
+            inline_edit_line = -1;
+            if (!doc->undo_stack.empty() && doc->undo_stack.back().action == UndoActionType::TextReplace && !doc->undo_stack.back().text_deltas.empty()) {
+                doc->select_start = doc->undo_stack.back().text_deltas.front().pos;
+                doc->select_end = doc->select_start + doc->undo_stack.back().text_deltas.front().new_str.length();
+            } else {
+                doc->select_start = doc->select_end = (size_t)-1;
+            }
+        }
+    };
+
+    auto LoadFile = [&](std::string path) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
@@ -317,7 +390,7 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
-    auto SaveFile = [&](const std::string& path) {
+    auto SaveFile = [&](std::string path) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
@@ -325,13 +398,21 @@ int main(int /*argc*/, char** /*argv*/) {
             SDL_SetWindowTitle(window, title);
             settings.AddRecentFile(path);
 
+            ApplyInlineEdit();
+
             doc_saving = true;
             if (doc_thread.joinable()) doc_thread.join();
             
             bool use_tabs = settings.use_tabs;
             int indent_size = settings.indent_size;
             bool keep_comments = settings.allow_comments;
-            doc_thread = std::thread([doc, path, use_tabs, indent_size, keep_comments, &doc_saving]() {
+            bool need_ast_rebuild = text_dirty;
+            text_dirty = false;
+            doc_thread = std::thread([doc, path, use_tabs, indent_size, keep_comments, need_ast_rebuild, &doc_saving, &search_dirty]() {
+                if (need_ast_rebuild) {
+                    doc->RebuildTreeFromText(keep_comments);
+                    search_dirty = true;
+                }
                 doc->SaveToFile(path.c_str(), use_tabs, indent_size, keep_comments);
                 doc_saving = false;
             });
@@ -442,7 +523,6 @@ int main(int /*argc*/, char** /*argv*/) {
                 inline_edit_buf.resize(len + 8192);
                 memcpy(inline_edit_buf.data(), doc->data + start, len);
                 inline_edit_buf[len] = '\0';
-                inline_edit_focus = true;
                 inline_edit_cursor_pos = 0;
             } else {
                 inline_edit_line = -1;
@@ -509,22 +589,10 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginMenu("Edit")) {
                 bool has_doc = (doc->data != nullptr) && !doc_loading && !doc_saving && !doc_formatting;
                 if (ImGui::MenuItem("Undo", "Ctrl+Z", false, has_doc && !doc->undo_stack.empty())) {
-                    if (doc->Undo()) {
-                        doc->ClearAstHistory();
-                        doc_formatting = true;
-                        bool allow_comments = settings.allow_comments;
-                        if (doc_thread.joinable()) doc_thread.join();
-                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
-                    }
+                    PerformUndo();
                 }
                 if (ImGui::MenuItem("Redo", "Ctrl+Y", false, has_doc && !doc->redo_stack.empty())) {
-                    if (doc->Redo()) {
-                        doc->ClearAstHistory();
-                        doc_formatting = true;
-                        bool allow_comments = settings.allow_comments;
-                        if (doc_thread.joinable()) doc_thread.join();
-                        doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
-                    }
+                    PerformRedo();
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy All", "Ctrl+Shift+C", false, has_doc)) {
@@ -685,22 +753,10 @@ int main(int /*argc*/, char** /*argv*/) {
         
         bool can_global_undo = !doc_loading && !doc_saving && !doc_formatting && doc->data && !ImGui::IsAnyItemActive();
         if (can_global_undo && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) {
-            if (doc->Undo()) {
-                doc->ClearAstHistory();
-                doc_formatting = true;
-                bool allow_comments = settings.allow_comments;
-                if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
-            }
+            PerformUndo();
         }
         if (can_global_undo && ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Y) || (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
-            if (doc->Redo()) {
-                doc->ClearAstHistory();
-                doc_formatting = true;
-                bool allow_comments = settings.allow_comments;
-                if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
-            }
+            PerformRedo();
         }
 
         if (ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Equal) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd)))
@@ -758,14 +814,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (apply_fix) {
                     doc->ReplaceLine(err_line_idx, error_fix_buf.data());
                     doc->ClearAstHistory();
-                    doc_formatting = true;
-                    bool allow_comments = settings.allow_comments;
-                    if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
-                        doc->RebuildTreeFromText(allow_comments); 
-                        doc_formatting = false; 
-                        search_dirty = true; 
-                    });
+                    text_dirty = true;
                     error_fix_line = -1;
                 }
             }
@@ -834,21 +883,17 @@ int main(int /*argc*/, char** /*argv*/) {
             
             ImGui::SameLine();
             if (ImGui::Button("Replace") && !search_results.empty() && doc->data) {
+                ApplyInlineEdit();
                 doc->ReplaceCurrent(search_buf, replace_buf, search_results, search_active_idx);
                 doc->ClearAstHistory();
-                doc_formatting = true;
-                bool allow_comments = settings.allow_comments;
-                if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                text_dirty = true;
             }
             ImGui::SameLine();
             if (ImGui::Button("Replace All") && !search_results.empty() && doc->data) {
+                ApplyInlineEdit();
                 doc->ReplaceAll(search_buf, replace_buf, search_results);
                 doc->ClearAstHistory();
-                doc_formatting = true;
-                bool allow_comments = settings.allow_comments;
-                if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                text_dirty = true;
             }
 
             ImGui::EndChild();
@@ -919,6 +964,15 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginTabItem("Tree View", nullptr, tree_tab_flags)) {
                 active_view = ActiveView::Tree;
                 force_tree_tab = false;
+
+                if (inline_edit_dirty) ApplyInlineEdit();
+                if (text_dirty && !doc_formatting && !doc_loading && !doc_saving) {
+                    text_dirty = false;
+                    doc_formatting = true;
+                    bool allow_comments = settings.allow_comments;
+                    if (doc_thread.joinable()) doc_thread.join();
+                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                }
 
                 ImGui::AlignTextToFramePadding();
                 ImGui::Text("JSONPath:");
@@ -1019,6 +1073,15 @@ int main(int /*argc*/, char** /*argv*/) {
             if (ImGui::BeginTabItem("Graph View", nullptr, graph_tab_flags)) {
                 active_view = ActiveView::Graph;
                 force_graph_tab = false;
+
+                if (inline_edit_dirty) ApplyInlineEdit();
+                if (text_dirty && !doc_formatting && !doc_loading && !doc_saving) {
+                    text_dirty = false;
+                    doc_formatting = true;
+                    bool allow_comments = settings.allow_comments;
+                    if (doc_thread.joinable()) doc_thread.join();
+                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                }
 
                 ImGui::AlignTextToFramePadding();
                 ImGui::Text("JSONPath:");
@@ -1168,53 +1231,25 @@ int main(int /*argc*/, char** /*argv*/) {
                 active_view = ActiveView::Text;
                 force_text_tab = false;
                 
-                auto SwitchToLineEdit = [&](int line_idx, int cursor_pos = -1) {
-                    if (line_idx < 0 || line_idx >= (int)doc->line_offsets.size()) return;
-                    inline_edit_line = line_idx;
-                    size_t start = doc->line_offsets[inline_edit_line];
-                    size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
-                    size_t text_end = end;
-                    if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
-                    if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
-                    size_t len = text_end - start;
-                    
-                    inline_edit_buf.resize(len + 8192);
-                    memcpy(inline_edit_buf.data(), doc->data + start, len);
-                    inline_edit_buf[len] = '\0';
-                    inline_edit_focus = true;
-                    
-                    if (cursor_pos != -1) inline_edit_cursor_pos = cursor_pos;
-                    if (inline_edit_cursor_pos > (int)len) inline_edit_cursor_pos = (int)len;
-                    
-                    doc->select_start = doc->select_end = (size_t)-1;
-                };
-
-                auto ApplyInlineEdit = [&]() -> bool {
-                    if (inline_edit_line >= 0 && inline_edit_line < (int)doc->line_offsets.size()) {
-                        size_t start = doc->line_offsets[inline_edit_line];
-                        size_t end = (inline_edit_line + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[inline_edit_line + 1] : doc->size;
-                        size_t text_end = end;
-                        if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
-                        if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
-                        std::string original_text(doc->data + start, text_end - start);
-                        if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
-                            doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
-                            doc->ClearAstHistory();
-                            doc_formatting = true;
-                            bool allow_comments = settings.allow_comments;
-                            if (doc_thread.joinable()) doc_thread.join();
-                            doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
-                                doc->RebuildTreeFromText(allow_comments); 
-                                doc_formatting = false; 
-                                search_dirty = true; 
-                            });
-                            return true;
-                        }
+                auto DeleteSelection = [&]() -> bool {
+                    if (doc->select_start != (size_t)-1 && doc->select_start != doc->select_end) {
+                        ApplyInlineEdit();
+                        size_t s_start = std::min(doc->select_start, doc->select_end);
+                        size_t s_end = std::max(doc->select_start, doc->select_end);
+                        doc->ReplaceText(s_start, s_end, "");
+                        doc->ClearAstHistory();
+                        text_dirty = true;
+                        
+                        int new_line = doc->GetLineFromOffset(s_start);
+                        int new_col = s_start - doc->line_offsets[new_line];
+                        
+                        SwitchToLineEdit(new_line, new_col);
+                        return true;
                     }
                     return false;
                 };
 
-                ImGui::BeginChild("TextChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+                ImGui::BeginChild("TextChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoNavInputs);
                 // If the DOM was edited, trigger the text regeneration in a background thread
                 if (doc->tree_dirty && !doc_loading && !doc_saving && !doc_formatting) {
                     doc->ClearTextHistory();
@@ -1244,16 +1279,16 @@ int main(int /*argc*/, char** /*argv*/) {
                     if (doc->data) {
                         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Ensure monospace if loaded
                         
-                        float exact_item_height = font_size + exact_item_spacing_y;
+                        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, 0.0f));
+                        float exact_item_height = font_size;
                         float char_width = ImGui::CalcTextSize("A").x;
                         ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
-                        
+
                         auto GetOffsetFromPos = [&](ImVec2 pos) -> size_t {
                             if (doc->line_offsets.empty()) return 0;
                             
                             double local_y = (double)pos.y - (double)text_start_pos.y;
                             int raw_line_idx = (int)(local_y / (double)exact_item_height);
-                            
                             if (raw_line_idx < 0) raw_line_idx = 0;
                             size_t line_idx = (size_t)raw_line_idx;
                             if (line_idx >= doc->line_offsets.size()) line_idx = doc->line_offsets.size() - 1;
@@ -1287,14 +1322,44 @@ int main(int /*argc*/, char** /*argv*/) {
                             return (size_t)(s - doc->data);
                         };
 
-                        auto GetOffsetFromLineAndX = [&](int line_idx, float screen_x) -> size_t {
-                            if (line_idx < 0 || line_idx >= (int)doc->line_offsets.size()) return 0;
-                            ImVec2 fake_pos(screen_x, text_start_pos.y + (float)line_idx * exact_item_height + exact_item_height * 0.5f);
-                            return GetOffsetFromPos(fake_pos);
-                        };
-
                         auto GetOffsetFromMouse = [&]() -> size_t {
                             return GetOffsetFromPos(ImGui::GetMousePos());
+                        };
+
+                        auto ScrollToKeepCursorVisible = [&](int line, int cursor_pos) {
+                            if (line < 0) return;
+                            float line_y = line * exact_item_height;
+                            float scroll_y = ImGui::GetScrollY();
+                            float window_h = ImGui::GetWindowHeight();
+                            
+                            float target_scroll_y = scroll_y;
+                            if (line_y < scroll_y) {
+                                target_scroll_y = line_y;
+                            } else if (line_y + exact_item_height > scroll_y + window_h - ImGui::GetStyle().ScrollbarSize) {
+                                target_scroll_y = line_y + exact_item_height - window_h + ImGui::GetStyle().ScrollbarSize;
+                            }
+                            if (target_scroll_y != scroll_y) {
+                                ImGui::SetScrollY(target_scroll_y);
+                            }
+                            
+                            if (cursor_pos >= 0) {
+                                float cursor_x = 0.0f;
+                                if (cursor_pos > 0 && cursor_pos <= (int)strlen(inline_edit_buf.data())) {
+                                    cursor_x = ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + cursor_pos).x;
+                                }
+                                float scroll_x = ImGui::GetScrollX();
+                                float window_w = ImGui::GetWindowWidth();
+                                
+                                float target_scroll_x = scroll_x;
+                                if (cursor_x < scroll_x) {
+                                    target_scroll_x = cursor_x;
+                                } else if (cursor_x > scroll_x + window_w - ImGui::GetStyle().ScrollbarSize - char_width) {
+                                    target_scroll_x = cursor_x - window_w + ImGui::GetStyle().ScrollbarSize + char_width;
+                                }
+                                if (target_scroll_x != scroll_x) {
+                                    ImGui::SetScrollX(target_scroll_x);
+                                }
+                            }
                         };
 
                         bool is_mouse_over_scrollbars = false;
@@ -1321,7 +1386,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                         SwitchToLineEdit(clicked_line, cursor_pos);
                                     }
                                 } else {
-                                    inline_edit_focus = true;
                                     inline_edit_cursor_pos = cursor_pos;
                                 }
                             }
@@ -1334,6 +1398,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
                         if (ImGui::IsWindowHovered() && !is_mouse_over_scrollbars && !ImGui::IsAnyItemHovered()) {
                             if (ImGui::IsMouseClicked(0)) {
+                                ImGui::SetWindowFocus("TextChild");
                                 size_t offset = GetOffsetFromMouse();
                                 int clicked_line = doc->GetLineFromOffset(offset);
                                 doc->select_start = doc->select_end = offset;
@@ -1380,10 +1445,275 @@ int main(int /*argc*/, char** /*argv*/) {
                             scroll_to_line = -1;
                         }
 
+                        bool has_selection = (doc->select_start != (size_t)-1 && doc->select_start != doc->select_end);
+                        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && (inline_edit_line != -1 || has_selection)) {
+                            bool selection_handled = false;
+                            if (has_selection) {
+                                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Home) || ImGui::IsKeyPressed(ImGuiKey_PageUp)) {
+                                    size_t s_start = std::min(doc->select_start, doc->select_end);
+                                    doc->select_start = doc->select_end = (size_t)-1;
+                                    if (inline_edit_line != -1) ApplyInlineEdit();
+                                    int new_line = doc->GetLineFromOffset(s_start);
+                                    int new_col = s_start - doc->line_offsets[new_line];
+                                    SwitchToLineEdit(new_line, new_col);
+                                    ScrollToKeepCursorVisible(new_line, new_col);
+                                    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow)) selection_handled = true;
+                                } else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_End) || ImGui::IsKeyPressed(ImGuiKey_PageDown)) {
+                                    size_t s_end = std::max(doc->select_start, doc->select_end);
+                                    doc->select_start = doc->select_end = (size_t)-1;
+                                    if (inline_edit_line != -1) ApplyInlineEdit();
+                                    int new_line = doc->GetLineFromOffset(s_end);
+                                    int new_col = s_end - doc->line_offsets[new_line];
+                                    SwitchToLineEdit(new_line, new_col);
+                                    ScrollToKeepCursorVisible(new_line, new_col);
+                                    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow)) selection_handled = true;
+                                }
+                            }
+
+                            if (selection_handled) {
+                                // Handled arrow selection jump
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && inline_edit_line > 0) {
+                                int target = inline_edit_line - 1;
+                                ApplyInlineEdit();
+                                SwitchToLineEdit(target, inline_edit_cursor_pos);
+                                ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && inline_edit_line != -1 && inline_edit_line < (int)doc->line_offsets.size() - 1) {
+                                int target = inline_edit_line + 1;
+                                ApplyInlineEdit();
+                                SwitchToLineEdit(target, inline_edit_cursor_pos);
+                                ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && inline_edit_line != -1 && inline_edit_cursor_pos > 0) {
+                                inline_edit_cursor_pos--;
+                                ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && inline_edit_line != -1 && inline_edit_cursor_pos < (int)strlen(inline_edit_buf.data())) {
+                                inline_edit_cursor_pos++;
+                                ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_Home) && inline_edit_line != -1) {
+                                if (ImGui::GetIO().KeyCtrl) {
+                                    ApplyInlineEdit();
+                                    SwitchToLineEdit(0, 0);
+                                    ScrollToKeepCursorVisible(0, 0);
+                                } else {
+                                    inline_edit_cursor_pos = 0;
+                                    ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                }
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_End) && inline_edit_line != -1) {
+                                if (ImGui::GetIO().KeyCtrl) {
+                                    ApplyInlineEdit();
+                                    int target = std::max(0, (int)doc->line_offsets.size() - 1);
+                                    SwitchToLineEdit(target, INT_MAX);
+                                    ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                                } else {
+                                    inline_edit_cursor_pos = (int)strlen(inline_edit_buf.data());
+                                    ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                }
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_PageUp) && inline_edit_line != -1) {
+                                int lines_per_page = std::max(1, (int)(ImGui::GetWindowHeight() / exact_item_height) - 1);
+                                int target = std::max(0, inline_edit_line - lines_per_page);
+                                ApplyInlineEdit();
+                                SwitchToLineEdit(target, inline_edit_cursor_pos);
+                                ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_PageDown) && inline_edit_line != -1) {
+                                int lines_per_page = std::max(1, (int)(ImGui::GetWindowHeight() / exact_item_height) - 1);
+                                int target = std::min((int)doc->line_offsets.size() - 1, inline_edit_line + lines_per_page);
+                                ApplyInlineEdit();
+                                SwitchToLineEdit(target, inline_edit_cursor_pos);
+                                ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+                                if (!DeleteSelection()) {
+                                    if (inline_edit_line != -1 && inline_edit_cursor_pos > 0) {
+                                        size_t len = strlen(inline_edit_buf.data());
+                                        memmove(inline_edit_buf.data() + inline_edit_cursor_pos - 1, inline_edit_buf.data() + inline_edit_cursor_pos, len - inline_edit_cursor_pos + 1);
+                                        inline_edit_cursor_pos--;
+                                        inline_edit_dirty = true;
+                                    } else if (inline_edit_line > 0) {
+                                        ApplyInlineEdit();
+                                        int prev_line = inline_edit_line - 1;
+                                        size_t start = doc->line_offsets[prev_line];
+                                        size_t end = doc->line_offsets[inline_edit_line];
+                                        size_t text_end = end;
+                                        if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                                        if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                                        
+                                        int new_col = text_end - start;
+                                        doc->ReplaceText(text_end, end, "");
+                                        doc->ClearAstHistory();
+                                        text_dirty = true;
+                                        SwitchToLineEdit(prev_line, new_col);
+                                    }
+                                }
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+                                if (!DeleteSelection()) {
+                                    if (inline_edit_line != -1) {
+                                        size_t len = strlen(inline_edit_buf.data());
+                                        if (inline_edit_cursor_pos < (int)len) {
+                                            memmove(inline_edit_buf.data() + inline_edit_cursor_pos, inline_edit_buf.data() + inline_edit_cursor_pos + 1, len - inline_edit_cursor_pos);
+                                            inline_edit_dirty = true;
+                                        } else if (inline_edit_line < (int)doc->line_offsets.size() - 1) {
+                                            ApplyInlineEdit();
+                                            size_t start = doc->line_offsets[inline_edit_line];
+                                            size_t end = doc->line_offsets[inline_edit_line + 1];
+                                            size_t text_end = end;
+                                            if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
+                                            if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
+                                            
+                                            doc->ReplaceText(text_end, end, "");
+                                            doc->ClearAstHistory();
+                                            text_dirty = true;
+                                            
+                                            SwitchToLineEdit(inline_edit_line, inline_edit_cursor_pos);
+                                        }
+                                    }
+                                }
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+                                DeleteSelection();
+                                if (inline_edit_line != -1) {
+                                    ApplyInlineEdit();
+                                    size_t offset = doc->line_offsets[inline_edit_line] + inline_edit_cursor_pos;
+                                    doc->ReplaceText(offset, offset, "\n");
+                                    doc->ClearAstHistory();
+                                    text_dirty = true;
+                                    
+                                    SwitchToLineEdit(inline_edit_line + 1, 0);
+                                }
+                            }
+                            else if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+                                std::string tab_str = settings.use_tabs ? "\t" : std::string(settings.indent_size, ' ');
+                                if (doc->select_start != (size_t)-1 && doc->select_start != doc->select_end) {
+                                    ApplyInlineEdit();
+                                    size_t s_start = std::min(doc->select_start, doc->select_end);
+                                    size_t s_end = std::max(doc->select_start, doc->select_end);
+                                    int line_start = doc->GetLineFromOffset(s_start);
+                                    int line_end = doc->GetLineFromOffset(s_end);
+                                    
+                                    // Do not indent the next line if the selection cleanly ends exactly at its start
+                                    if (line_end > line_start && s_end == doc->line_offsets[line_end]) {
+                                        line_end--;
+                                    }
+                                    
+                                    size_t block_start = doc->line_offsets[line_start];
+                                    size_t block_end = (line_end + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[line_end + 1] : doc->size;
+                                    
+                                    std::string old_block(doc->data + block_start, block_end - block_start);
+                                    std::string new_block;
+                                    new_block.reserve(old_block.size() + (line_end - line_start + 1) * tab_str.length());
+                                    
+                                    const char* ptr = old_block.c_str();
+                                    const char* end_ptr = ptr + old_block.length();
+                                    
+                                    for (int i = line_start; i <= line_end; i++) {
+                                        new_block += tab_str;
+                                        const char* next_nl = strchr(ptr, '\n');
+                                        if (next_nl && next_nl < end_ptr) {
+                                            new_block.append(ptr, next_nl - ptr + 1);
+                                            ptr = next_nl + 1;
+                                        } else {
+                                            new_block.append(ptr, end_ptr - ptr);
+                                            ptr = end_ptr;
+                                        }
+                                    }
+                                    if (ptr < end_ptr) {
+                                        new_block.append(ptr, end_ptr - ptr);
+                                    }
+                                    
+                                    size_t saved_start = doc->select_start;
+                                    size_t saved_end = doc->select_end;
+                                    
+                                    for (int i = line_start; i <= line_end; i++) {
+                                        size_t original_pos = doc->line_offsets[i];
+                                        if (doc->select_start >= original_pos) saved_start += tab_str.length();
+                                        if (doc->select_end >= original_pos) saved_end += tab_str.length();
+                                    }
+                                    
+                                    doc->ReplaceText(block_start, block_end, new_block.c_str());
+                                    doc->ClearAstHistory();
+                                    text_dirty = true;
+                                    
+                                    int active_line = doc->GetLineFromOffset(saved_end);
+                                    int active_col = saved_end - doc->line_offsets[active_line];
+                                    SwitchToLineEdit(active_line, active_col);
+                                    
+                                    // Restore the exact selection bounds so the text remains highlighted
+                                    doc->select_start = saved_start;
+                                    doc->select_end = saved_end;
+                                } else if (inline_edit_line != -1) {
+                                    size_t cb_len = tab_str.length();
+                                    size_t len = strlen(inline_edit_buf.data());
+                                    if (len + cb_len + 2 > inline_edit_buf.size()) inline_edit_buf.resize(len + cb_len + 1024);
+                                    memmove(inline_edit_buf.data() + inline_edit_cursor_pos + cb_len, inline_edit_buf.data() + inline_edit_cursor_pos, len - inline_edit_cursor_pos + 1);
+                                    memcpy(inline_edit_buf.data() + inline_edit_cursor_pos, tab_str.c_str(), cb_len);
+                                    inline_edit_cursor_pos += cb_len;
+                                    inline_edit_dirty = true;
+                                }
+                            }
+                            
+                            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V)) {
+                                const char* cb = ImGui::GetClipboardText();
+                                if (cb) {
+                                    DeleteSelection();
+                                    if (inline_edit_line != -1) {
+                                        if (strchr(cb, '\n') != nullptr || strchr(cb, '\r') != nullptr) {
+                                            ApplyInlineEdit();
+                                            size_t offset = doc->line_offsets[inline_edit_line] + inline_edit_cursor_pos;
+                                            doc->ReplaceText(offset, offset, cb);
+                                            doc->ClearAstHistory();
+                                            text_dirty = true;
+                                            
+                                            int new_line = inline_edit_line;
+                                            int new_col = inline_edit_cursor_pos;
+                                            for (const char* p = cb; *p; p++) {
+                                                if (*p == '\n') { new_line++; new_col = 0; }
+                                                else if (*p != '\r') new_col++;
+                                            }
+                                            SwitchToLineEdit(new_line, new_col);
+                                        } else {
+                                            size_t cb_len = strlen(cb);
+                                            size_t len = strlen(inline_edit_buf.data());
+                                            if (len + cb_len + 2 > inline_edit_buf.size()) inline_edit_buf.resize(len + cb_len + 1024);
+                                            memmove(inline_edit_buf.data() + inline_edit_cursor_pos + cb_len, inline_edit_buf.data() + inline_edit_cursor_pos, len - inline_edit_cursor_pos + 1);
+                                            memcpy(inline_edit_buf.data() + inline_edit_cursor_pos, cb, cb_len);
+                                            inline_edit_cursor_pos += cb_len;
+                                            inline_edit_dirty = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                for (int n = 0; n < io.InputQueueCharacters.Size; n++) {
+                                    unsigned int c = (unsigned int)io.InputQueueCharacters[n];
+                                    if (c >= 32 && c != 127) {
+                                        DeleteSelection();
+                                        if (inline_edit_line != -1) {
+                                            size_t len = strlen(inline_edit_buf.data());
+                                            if (len + 2 > inline_edit_buf.size()) inline_edit_buf.resize(len + 1024);
+                                            memmove(inline_edit_buf.data() + inline_edit_cursor_pos + 1, inline_edit_buf.data() + inline_edit_cursor_pos, len - inline_edit_cursor_pos + 1);
+                                            inline_edit_buf[inline_edit_cursor_pos] = (char)c;
+                                            inline_edit_cursor_pos++;
+                                            inline_edit_dirty = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         ImGuiListClipper clipper;
                         clipper.Begin((int)doc->line_offsets.size(), exact_item_height);
                         while (clipper.Step()) {
-                            for (size_t i = (size_t)clipper.DisplayStart; i < (size_t)clipper.DisplayEnd; i++) {
+                            for (int clipper_i = clipper.DisplayStart; clipper_i < clipper.DisplayEnd; clipper_i++) {
+                                size_t i = (size_t)clipper_i;
+
+                                ImGui::SetCursorPosY(clipper_i * exact_item_height);
+
                                 size_t start = doc->line_offsets[i];
                                 size_t end = (i + 1 < doc->line_offsets.size()) ? doc->line_offsets[i + 1] : doc->size;
                                 if (end > start && doc->data[end - 1] == '\n') end--; // Trim trailing newline for rendering
@@ -1444,192 +1774,16 @@ int main(int /*argc*/, char** /*argv*/) {
                                     }
                                 }
 
+                                const char* p;
+                                const char* end_ptr;
                                 if (inline_edit_line == (int)i) {
-                                    ImGui::PushID((int)i);
-                                    ImGui::PushItemWidth(-1.0f);
-                                    if (inline_edit_focus) {
-                                        ImGui::SetKeyboardFocusHere();
-                                        inline_edit_focus = false;
-                                    }
-                                    
-                                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
-                                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-                                    
-                                    struct EditState {
-                                        int* p_cursor;
-                                        int current_cursor;
-                                    };
-                                    EditState edit_state;
-                                    edit_state.p_cursor = &inline_edit_cursor_pos;
-                                    edit_state.current_cursor = 0;
-
-                                    ImVec4 orig_text_col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0)); // Transparent text for input
-
-                                    ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways;
-                                    bool enter_pressed = ImGui::InputText("##inline_edit", inline_edit_buf.data(), inline_edit_buf.size(), flags,
-                                        [](ImGuiInputTextCallbackData* data) -> int {
-                                            EditState* s = static_cast<EditState*>(data->UserData);
-                                            if (*s->p_cursor >= 0) {
-                                                data->CursorPos = *s->p_cursor;
-                                                data->SelectionStart = *s->p_cursor;
-                                                data->SelectionEnd = *s->p_cursor;
-                                                *s->p_cursor = -1;
-                                            }
-                                            s->current_cursor = data->CursorPos;
-                                            return 0;
-                                        }, &edit_state);
-                                    bool deactivated = ImGui::IsItemDeactivated();
-                                    
-                                    ImVec2 item_min = ImGui::GetItemRectMin();
-                                    ImVec2 item_max = ImGui::GetItemRectMax();
-
-                                    bool is_active = ImGui::IsItemActive();
-                                    bool drag_outside = false;
-                                    if (is_active && ImGui::IsMouseDragging(0)) {
-                                        ImVec2 mouse_pos = ImGui::GetMousePos();
-                                        if (mouse_pos.y < item_min.y || mouse_pos.y > item_max.y) {
-                                            drag_outside = true;
-                                        }
-                                    }
-                                    
-                                    bool move_up = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_UpArrow);
-                                    bool move_down = ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_DownArrow);
-                                    
-                                    ImGui::PopStyleColor(); // Pop Transparent Text
-
-                                    // Render custom highlighted text
-                                    ImGuiID id = ImGui::GetID("##inline_edit");
-                                    ImGuiInputTextState* state = ImGui::GetInputTextState(id);
-                                    float scroll_x = state ? state->ScrollX : 0.0f;
-                                    
-                                    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-                                    draw_list->PushClipRect(item_min, ImVec2(item_max.x, item_max.y + ImGui::GetFontSize() * 0.3f), true);
-                                    
-                                    ImVec2 text_pos = ImVec2(item_min.x - scroll_x, item_min.y);
-                                    
-                                    const char* p = inline_edit_buf.data();
-                                    const char* end_ptr = p + strlen(p);
-                                    ImVec2 current_pos = text_pos;
-
-                                    ImVec4 col_str(0.80f, 0.53f, 0.35f, 1.0f);
-                                    ImVec4 col_key(0.61f, 0.86f, 0.99f, 1.0f);
-                                    ImVec4 col_num(0.71f, 0.81f, 0.66f, 1.0f);
-                                    ImVec4 col_bool(0.34f, 0.61f, 0.84f, 1.0f);
-                                    ImVec4 col_punc(0.60f, 0.60f, 0.60f, 1.0f);
-                                    ImVec4 col_comm(0.40f, 0.70f, 0.40f, 1.0f);
-
-                                    const ImFont* font = ImGui::GetFont();
-                                    float local_font_size = ImGui::GetFontSize();
-
-                                    while (p < end_ptr) {
-                                        const char* token_start = p;
-                                        ImVec4 col = orig_text_col;
-                                        
-                                        if (isspace(*p)) {
-                                            while (p < end_ptr && isspace(*p)) p++;
-                                        } else if (*p == '"') {
-                                            p++;
-                                            while (p < end_ptr) {
-                                                if (*p == '\\' && p + 1 < end_ptr) p += 2;
-                                                else if (*p == '"') { p++; break; }
-                                                else p++;
-                                            }
-                                            bool is_obj_key = false;
-                                            const char* peek = p;
-                                            while (peek < end_ptr && isspace(*peek)) peek++;
-                                            if (peek < end_ptr && *peek == ':') is_obj_key = true;
-                                            col = is_obj_key ? col_key : col_str;
-                                        } else if (isdigit(*p) || *p == '-') {
-                                            col = col_num;
-                                            while (p < end_ptr && (isalnum(*p) || *p == '.' || *p == '+' || *p == '-')) p++;
-                                        } else if (isalpha(*p)) {
-                                            col = col_bool;
-                                            while (p < end_ptr && isalpha(*p)) p++;
-                                        } else if (*p == '/' && p + 1 < end_ptr) {
-                                            if (*(p+1) == '/') {
-                                                col = col_comm;
-                                                p = end_ptr;
-                                            } else if (*(p+1) == '*') {
-                                                col = col_comm;
-                                                const char* end_comment = p + 2;
-                                                while (end_comment < end_ptr) {
-                                                    if (*end_comment == '*' && (end_comment + 1 < end_ptr) && *(end_comment + 1) == '/') {
-                                                        p = end_comment + 2;
-                                                        break;
-                                                    }
-                                                    end_comment++;
-                                                }
-                                                if (end_comment >= end_ptr) { p = end_ptr; }
-                                            } else { col = col_punc; p++; }
-                                        } else {
-                                            col = col_punc;
-                                            p++;
-                                        }
-                                        
-                                        if (p > token_start) {
-                                            draw_list->AddText(font, local_font_size, current_pos, ImGui::ColorConvertFloat4ToU32(col), token_start, p);
-                                            current_pos.x += font->CalcTextSizeA(local_font_size, FLT_MAX, -1.0f, token_start, p, NULL).x;
-                                        }
-                                    }
-
-                                    if (ImGui::IsItemFocused()) {
-                                        static double last_cursor_time = 0.0;
-                                        static int last_cursor_pos_track = -1;
-                                        if (last_cursor_pos_track != edit_state.current_cursor) {
-                                            last_cursor_pos_track = edit_state.current_cursor;
-                                            last_cursor_time = ImGui::GetTime();
-                                        }
-                                        if (fmod(ImGui::GetTime() - last_cursor_time, 1.0) < 0.5) {
-                                            float cursor_x = font->CalcTextSizeA(local_font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + edit_state.current_cursor, NULL).x;
-                                            ImVec2 p1 = ImVec2(text_pos.x + cursor_x, text_pos.y);
-                                            ImVec2 p2 = ImVec2(p1.x, p1.y + local_font_size);
-                                            draw_list->AddLine(p1, p2, ImGui::ColorConvertFloat4ToU32(orig_text_col), 1.0f);
-                                        }
-                                    }
-
-                                    draw_list->PopClipRect();
-
-                                    ImGui::PopStyleVar();
-                                    ImGui::PopStyleColor();
-                                    ImGui::PopItemWidth();
-                                    ImGui::PopID();
-                                    
-                                    if (drag_outside) {
-                                        int clicked_line = inline_edit_line;
-                                        ApplyInlineEdit();
-                                        inline_edit_line = -1;
-                                        inline_edit_needs_refresh = false;
-                                        is_selecting_text = true;
-                                        doc->select_start = GetOffsetFromLineAndX(clicked_line, ImGui::GetIO().MouseClickedPos[0].x);
-                                        doc->select_end = GetOffsetFromMouse();
-                                    } else if (enter_pressed || move_up || move_down) {
-                                        int target_line = inline_edit_line;
-                                        if (move_up && inline_edit_line > 0) target_line--;
-                                        else if ((move_down || enter_pressed) && inline_edit_line < (int)doc->line_offsets.size() - 1) target_line++;
-                                        
-                                        if (move_up || move_down) {
-                                            inline_edit_cursor_pos = edit_state.current_cursor;
-                                        } else {
-                                            inline_edit_cursor_pos = 0;
-                                        }
-
-                                        if (ApplyInlineEdit()) {
-                                            inline_edit_line = target_line;
-                                            inline_edit_needs_refresh = true;
-                                        } else {
-                                            SwitchToLineEdit(target_line);
-                                        }
-                                    } else if (deactivated) {
-                                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                                            inline_edit_line = -1;
-                                        } else {
-                                            ApplyInlineEdit();
-                                        }
-                                    }
+                                    p = inline_edit_buf.data();
+                                    end_ptr = p + strlen(p);
                                 } else {
-                                    const char* p = doc->data + start;
-                                    const char* end_ptr = doc->data + end;
+                                    p = doc->data + start;
+                                    end_ptr = doc->data + end;
+                                }
+                                
                                     bool first = true;
                                     int token_count = 0;
                                     
@@ -1700,10 +1854,30 @@ int main(int /*argc*/, char** /*argv*/) {
                                     }
                                     
                                     if (first) ImGui::TextUnformatted("");
+                                
+                                if (inline_edit_line == (int)i && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+                                    static double last_cursor_time = 0.0;
+                                    static int last_cursor_pos_track = -1;
+                                    if (last_cursor_pos_track != inline_edit_cursor_pos) {
+                                        last_cursor_pos_track = inline_edit_cursor_pos;
+                                        last_cursor_time = ImGui::GetTime();
+                                    } else if (io.InputQueueCharacters.Size > 0) {
+                                        last_cursor_time = ImGui::GetTime();
+                                    }
+                                    if (fmod(ImGui::GetTime() - last_cursor_time, 1.0) < 0.5) {
+                                        float cursor_x = 0.0f;
+                                        if (inline_edit_cursor_pos > 0) {
+                                            cursor_x = ImGui::GetFont()->CalcTextSizeA(font_size, FLT_MAX, -1.0f, inline_edit_buf.data(), inline_edit_buf.data() + inline_edit_cursor_pos).x;
+                                        }
+                                        ImVec2 p1 = ImVec2(pos.x + cursor_x, pos.y);
+                                        ImVec2 p2 = ImVec2(p1.x, p1.y + font_size);
+                                        ImGui::GetWindowDrawList()->AddLine(p1, p2, IM_COL32(255, 255, 255, 255), 1.0f);
+                                    }
                                 }
                             }
                         }
                         ImGui::PopFont();
+                        ImGui::PopStyleVar();
                     }
                 }
                 ImGui::EndChild();
