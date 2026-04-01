@@ -378,12 +378,18 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         
         ImGuiListClipper clipper;
         clipper.Begin((int)val->as.list.count);
+        float max_y = ImGui::GetCursorPosY();
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
                 int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], i, current_path, focus_path, highlight_val, highlight_time, my_path);
                 if (child_action & 1) action |= 1;
                 if (child_action & 2) item_to_remove = i; 
             }
+            max_y = std::max(max_y, ImGui::GetCursorPosY());
+        }
+        
+        if (ImGui::GetCursorPosY() < max_y) {
+            ImGui::SetCursorPosY(max_y);
         }
         
         if (item_to_remove >= 0) {
