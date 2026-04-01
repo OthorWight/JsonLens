@@ -38,6 +38,7 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
     node->label = key.empty() ? preview : (key + ": " + preview);
 
     if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
+        node->children.reserve(val->as.list.count);
         for (size_t i = 0; i < val->as.list.count; i++) {
             std::string child_key = (val->type == JSON_OBJECT) ? (val->as.list.items[i].key ? val->as.list.items[i].key : "") : ("[" + std::to_string(i) + "]");
             GraphNode* child = BuildGraphNode(doc, &val->as.list.items[i].value, child_key, depth + 1, node_count);
@@ -47,6 +48,9 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
             }
         }
     }
+    
+    node->children.shrink_to_fit();
+    node->label.shrink_to_fit();
     return node;
 }
 
