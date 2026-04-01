@@ -6,7 +6,9 @@
 #include <algorithm> // For std::find
 
 GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string& key, int depth, int& node_count) {
-    if (!val || node_count > 100000) return nullptr;
+    if (!val) {
+        return nullptr;
+    }
     node_count++;
 
     GraphNode* node = new GraphNode();
@@ -36,55 +38,13 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
     node->label = key.empty() ? preview : (key + ": " + preview);
 
     if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
-        size_t start_idx = doc->graph_pagination[val];
-        if (start_idx >= val->as.list.count && val->as.list.count > 0)
-            start_idx = (val->as.list.count - 1) / doc->pagination_size * doc->pagination_size;
-
-        size_t remaining = val->as.list.count > start_idx ? val->as.list.count - start_idx : 0;
-        size_t count = remaining > (size_t)doc->pagination_size ? (size_t)doc->pagination_size : remaining;
-
-        if (start_idx > 0) {
-            GraphNode* prev_node = new GraphNode();
-            prev_node->label = "[< Previous Page]";
-            prev_node->type = GraphNodeType::PrevPage;
-            prev_node->source_val = val;
-            prev_node->parent = node;
-            node->children.push_back(prev_node);
-        }
-
-        size_t actual_count = 0;
-        for (size_t i = start_idx; i < start_idx + count; i++) {
-            if (node_count > 100000) {
-                if (depth == 1) {
-                    delete node;
-                    return nullptr;
-                }
-                break; // Global cap reached
-            }
-
+        for (size_t i = 0; i < val->as.list.count; i++) {
             std::string child_key = (val->type == JSON_OBJECT) ? (val->as.list.items[i].key ? val->as.list.items[i].key : "") : ("[" + std::to_string(i) + "]");
             GraphNode* child = BuildGraphNode(doc, &val->as.list.items[i].value, child_key, depth + 1, node_count);
             
-            if (!child && node_count > 100000) {
-                if (depth == 1) {
-                    delete node;
-                    return nullptr;
-                }
-                break;
+            if (child) {
+                child->parent = node; node->children.push_back(child);
             }
-            
-            if (child) { child->parent = node; node->children.push_back(child); actual_count++; }
-        }
-        
-        if (start_idx + actual_count < val->as.list.count) {
-            size_t step = actual_count > 0 ? actual_count : count;
-            GraphNode* more = new GraphNode();
-            more->label = "[Next " + std::to_string(step) + " >] (" + std::to_string(val->as.list.count - (start_idx + actual_count)) + " remaining)";
-            more->type = GraphNodeType::NextPage;
-            more->source_val = val;
-            more->page_step = step;
-            more->parent = node;
-            node->children.push_back(more);
         }
     }
     return node;
@@ -92,11 +52,16 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
 
 void LayoutGraphNode(GraphNode* node, int depth, float& current_y, float& max_x, float current_x) {
     node->x = current_x;
-    node->drawn_width = ImGui::CalcTextSize(node->label.c_str()).x + 16.0f;
+    
+    // Approximate width (ImGui context isn't thread-safe, allowing background processing)
+    node->drawn_width = (node->label.length() * 8.0f) + 16.0f;
+
     if (node->x + node->drawn_width > max_x) max_x = node->x + node->drawn_width;
 
     if (node->children.empty()) {
         node->y = current_y;
+        node->subtree_min_y = current_y - 20.0f;
+        node->subtree_max_y = current_y + 20.0f;
         current_y += 34.0f;
     } else {
         float start_y = current_y;
@@ -105,12 +70,38 @@ void LayoutGraphNode(GraphNode* node, int depth, float& current_y, float& max_x,
             LayoutGraphNode(child, depth + 1, current_y, max_x, next_x);
         }
         node->y = (start_y + (current_y - 34.0f)) / 2.0f;
+        node->subtree_min_y = start_y - 20.0f;
+        node->subtree_max_y = current_y + 20.0f;
     }
 }
 
 void DrawGraphEdges(ImDrawList* dl, GraphNode* node, ImVec2 offset, const ImRect& clip_rect) {
+    if (offset.x + node->x > clip_rect.Max.x) return;
+    
+    // Padding of 40.0f to account for Bezier curve dip
+    if (offset.y + node->subtree_max_y + 40.0f < clip_rect.Min.y || 
+        offset.y + node->subtree_min_y - 40.0f > clip_rect.Max.y) {
+        return; 
+    }
+
     ImU32 edge_col = IM_COL32(100, 100, 100, 255);
-    for (auto child : node->children) {
+    
+    float min_visible_y = clip_rect.Min.y - offset.y - 40.0f; // Pad search to ensure we catch curves
+    float max_visible_y = clip_rect.Max.y - offset.y + 40.0f;
+
+    auto it = std::lower_bound(node->children.begin(), node->children.end(), min_visible_y,
+        [](const GraphNode* child, float y) {
+            return child->subtree_max_y < y;
+        });
+
+    // Step back one to draw the edge from parent to a child just above the screen
+    if (it != node->children.begin()) {
+        --it;
+    }
+
+    for (; it != node->children.end(); ++it) {
+        GraphNode* child = *it;
+        
         ImVec2 p1 = ImVec2(offset.x + node->x + node->drawn_width, offset.y + node->y);
         ImVec2 p2 = ImVec2(offset.x + child->x, offset.y + child->y);
 
@@ -122,11 +113,19 @@ void DrawGraphEdges(ImDrawList* dl, GraphNode* node, ImVec2 offset, const ImRect
         if (clip_rect.Overlaps(ImRect(min_x, min_y - 40.0f, max_x, max_y + 40.0f))) {
             dl->AddBezierCubic(p1, ImVec2(p1.x + 40.0f, p1.y), ImVec2(p2.x - 40.0f, p2.y), p2, edge_col, 1.5f);
         }
+        
         DrawGraphEdges(dl, child, offset, clip_rect);
+        
+        if (child->subtree_min_y > max_visible_y) {
+            break;
+        }
     }
 }
 
 void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse_pos, GraphNode** out_hovered, const ImRect& clip_rect, JsonValue* highlight_val, double highlight_time, int focus_frames) {
+    if (offset.x + node->x > clip_rect.Max.x) return;
+    if (offset.y + node->subtree_max_y < clip_rect.Min.y || offset.y + node->subtree_min_y > clip_rect.Max.y) return;
+
     ImVec2 p_min = ImVec2(offset.x + node->x, offset.y + node->y - 12.0f);
     ImVec2 p_max = ImVec2(p_min.x + node->drawn_width, p_min.y + 24.0f);
 
@@ -159,7 +158,19 @@ void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse
         dl->AddText(ImVec2(p_min.x + 8.0f, text_y), text_col, node->label.c_str());
     }
 
-    for (auto child : node->children) {
+    float min_visible_y = clip_rect.Min.y - offset.y;
+    float max_visible_y = clip_rect.Max.y - offset.y;
+
+    auto it = std::lower_bound(node->children.begin(), node->children.end(), min_visible_y,
+        [](const GraphNode* child, float y) {
+            return child->subtree_max_y < y;
+        });
+
+    for (; it != node->children.end(); ++it) {
+        GraphNode* child = *it;
+        if (child->subtree_min_y > max_visible_y) {
+            break;
+        }
         DrawGraphNodes(dl, child, offset, mouse_pos, out_hovered, clip_rect, highlight_val, highlight_time, focus_frames);
     }
 }

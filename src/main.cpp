@@ -180,6 +180,7 @@ int main(int /*argc*/, char** /*argv*/) {
     std::atomic<bool> doc_loading{false};
     std::atomic<bool> doc_saving{false};
     std::atomic<bool> doc_formatting{false};
+    std::atomic<bool> doc_graph_building{false};
     std::atomic<LargeTextFile*> doc_ready{nullptr};
     std::thread doc_thread;
 
@@ -568,7 +569,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                bool has_doc = (doc->data != nullptr) && !doc_loading && !doc_saving && !doc_formatting;
+            bool has_doc = (doc->data != nullptr) && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building;
                 if (ImGui::MenuItem("Save", "Ctrl+S", false, has_doc && filepath_buffer[0] != '\0')) {
                     SaveFile(filepath_buffer);
                 }
@@ -587,7 +588,7 @@ int main(int /*argc*/, char** /*argv*/) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Edit")) {
-                bool has_doc = (doc->data != nullptr) && !doc_loading && !doc_saving && !doc_formatting;
+            bool has_doc = (doc->data != nullptr) && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building;
                 if (ImGui::MenuItem("Undo", "Ctrl+Z", false, has_doc && !doc->undo_stack.empty())) {
                     PerformUndo();
                 }
@@ -710,7 +711,7 @@ int main(int /*argc*/, char** /*argv*/) {
             LoadFile(ShowOpenFileDialog(settings.last_folder));
         }
         
-        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
+        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S) && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data) {
             if (ImGui::GetIO().KeyShift) {
                 SaveFile(ShowSaveFileDialog());
             } else if (filepath_buffer[0] != '\0') {
@@ -719,15 +720,15 @@ int main(int /*argc*/, char** /*argv*/) {
                 SaveFile(ShowSaveFileDialog());
             }
         }
-        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W) && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W) && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data) {
             delete doc;
             doc = new LargeTextFile();
             filepath_buffer[0] = '\0';
             SDL_SetWindowTitle(window, "JsonLens - Dear ImGui");
         }
 
-        if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
-            if (!doc_loading && !doc_saving && !doc_formatting && doc->data) {
+    if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
+        if (!doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data) {
                 if (doc->tree_dirty) doc->RebuildTextFromTree(settings.use_tabs, settings.indent_size, settings.allow_comments);
                 ImGui::SetClipboardText(doc->data);
             }
@@ -739,7 +740,7 @@ int main(int /*argc*/, char** /*argv*/) {
             FormatFile(false);
         }
         
-        bool can_global_search = !doc_loading && !doc_saving && !doc_formatting && doc->data;
+        bool can_global_search = !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data;
         if (can_global_search && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F)) {
             if (!show_search_bar) search_dirty = true;
             show_search_bar = true;
@@ -751,7 +752,7 @@ int main(int /*argc*/, char** /*argv*/) {
             focus_replace = true;
         }
         
-        bool can_global_undo = !doc_loading && !doc_saving && !doc_formatting && doc->data && !ImGui::IsAnyItemActive();
+        bool can_global_undo = !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data && !ImGui::IsAnyItemActive();
         if (can_global_undo && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) {
             PerformUndo();
         }
@@ -1149,13 +1150,18 @@ int main(int /*argc*/, char** /*argv*/) {
                 }
 
                 ImGui::BeginChild("GraphViewChild", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
-                if (doc_loading || doc_saving || doc_formatting) {
+            if (doc_loading || doc_saving || doc_formatting || doc_graph_building) {
                     const char* msg = doc_loading ? "Loading and parsing JSON... Please wait." : 
                                       doc_saving ? "Saving JSON... Please wait." : 
+                                  doc_graph_building ? "Building Graph View... Please wait." :
                                       "Processing JSON... Please wait.";
                     ImGui::TextDisabled("%s", msg);
                 } else if (doc->root_json) {
                     if (doc->graph_dirty) {
+                        doc->graph_dirty = false;
+                    doc_graph_building = true;
+                    if (doc_thread.joinable()) doc_thread.join();
+                    doc_thread = std::thread([doc, &doc_graph_building]() {
                         doc->ClearGraph();
                         int node_count = 0;
                         doc->graph_root = BuildGraphNode(doc, doc->root_json, "Root", 0, node_count);
@@ -1166,7 +1172,8 @@ int main(int /*argc*/, char** /*argv*/) {
                             doc->graph_total_width = max_x + 100.0f;
                             doc->graph_total_height = current_y + 40.0f;
                         }
-                        doc->graph_dirty = false;
+                        doc_graph_building = false;
+                    });
                     }
 
                     ImVec2 offset = ImGui::GetCursorScreenPos();

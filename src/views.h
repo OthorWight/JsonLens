@@ -20,6 +20,8 @@ struct GraphNode {
     std::vector<GraphNode*> children;
     float x = 0, y = 0;
     float drawn_width = 0;
+    float subtree_min_y = 0;
+    float subtree_max_y = 0;
     size_t offset = 0;
     GraphNode* parent = nullptr;
     GraphNodeType type = GraphNodeType::Normal;
