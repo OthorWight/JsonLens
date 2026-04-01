@@ -376,21 +376,44 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         bool is_obj = (val->type == JSON_OBJECT);
         int item_to_remove = -1;
         
-        ImGuiListClipper clipper;
-        clipper.Begin((int)val->as.list.count);
-        float max_y = ImGui::GetCursorPosY();
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], i, current_path, focus_path, highlight_val, highlight_time, my_path);
-                if (child_action & 1) action |= 1;
-                if (child_action & 2) item_to_remove = i; 
+        float line_height = ImGui::GetFrameHeightWithSpacing();
+        ImVec2 clip_min = ImGui::GetWindowDrawList()->GetClipRectMin();
+        ImVec2 clip_max = ImGui::GetWindowDrawList()->GetClipRectMax();
+        
+        for (size_t i = 0; i < val->as.list.count; i++) {
+            JsonNode* child_node = &val->as.list.items[i];
+            JsonValue* child_val = &child_node->value;
+            
+            bool is_container_child = (child_val->type == JSON_OBJECT || child_val->type == JSON_ARRAY);
+            bool is_open = false;
+            
+            if (is_container_child) {
+                ImGui::PushID((int)i);
+                ImGuiID node_id = ImGui::GetID("Node");
+                is_open = ImGui::GetStateStorage()->GetInt(node_id, 0) != 0;
+                ImGui::PopID();
+                
+                if (!is_open && !focus_path.empty() && child_val != nullptr) {
+                    if (std::find(focus_path.begin(), focus_path.end(), child_val) != focus_path.end()) {
+                        is_open = true;
+                    }
+                }
             }
-            max_y = std::max(max_y, ImGui::GetCursorPosY());
+
+            if (!is_open) {
+                float pos_y = ImGui::GetCursorScreenPos().y;
+                if (pos_y + line_height < clip_min.y - 50.0f || pos_y > clip_max.y + 50.0f) {
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + line_height);
+                    continue;
+                }
+            }
+
+            int child_action = DrawEditableJsonNode(doc, child_node, (int)i, current_path, focus_path, highlight_val, highlight_time, my_path);
+            if (child_action & 1) action |= 1;
+            if (child_action & 2) item_to_remove = (int)i; 
         }
         
-        if (ImGui::GetCursorPosY() < max_y) {
-            ImGui::SetCursorPosY(max_y);
-        }
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));
         
         if (item_to_remove >= 0) {
             JsonRemoveAtIndex(val, item_to_remove);
