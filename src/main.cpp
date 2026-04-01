@@ -322,6 +322,7 @@ int main(int /*argc*/, char** /*argv*/) {
             if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
             std::string original_text(doc->data + start, text_end - start);
             if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
+                printf("[DEBUG-TEXT] Applying inline edit to line %d\n", inline_edit_line);
                 doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
                 doc->ClearAstHistory();
                 text_dirty = true;
@@ -1289,12 +1290,17 @@ int main(int /*argc*/, char** /*argv*/) {
                         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, 0.0f));
                         float exact_item_height = font_size;
                         float char_width = ImGui::CalcTextSize("A").x;
+                        float start_padding_x = ImGui::GetCursorPosX();
+                        float start_padding_y = ImGui::GetCursorPosY();
                         ImVec2 text_start_pos = ImGui::GetCursorScreenPos();
 
                         auto GetOffsetFromPos = [&](ImVec2 pos) -> size_t {
                             if (doc->line_offsets.empty()) return 0;
                             
-                            double local_y = (double)pos.y - (double)text_start_pos.y;
+                            double scroll_y = (double)ImGui::GetScrollY();
+                            double window_base_y = (double)ImGui::GetWindowPos().y + (double)start_padding_y;
+                            double local_y = (double)pos.y - window_base_y + scroll_y;
+                            
                             int raw_line_idx = (int)(local_y / (double)exact_item_height);
                             if (raw_line_idx < 0) raw_line_idx = 0;
                             size_t line_idx = (size_t)raw_line_idx;
@@ -1326,6 +1332,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                 }
                                 s += bytes;
                             }
+                        // printf("[DEBUG-TEXT] GetOffsetFromPos: mapped local_y=%f to line_idx=%zu, offset=%zu\n", local_y, line_idx, (size_t)(s - doc->data));
                             return (size_t)(s - doc->data);
                         };
 
@@ -1335,15 +1342,15 @@ int main(int /*argc*/, char** /*argv*/) {
 
                         auto ScrollToKeepCursorVisible = [&](int line, int cursor_pos) {
                             if (line < 0) return;
-                            float line_y = line * exact_item_height;
+                                    double line_y_d = (double)start_padding_y + (double)line * (double)exact_item_height;
                             float scroll_y = ImGui::GetScrollY();
                             float window_h = ImGui::GetWindowHeight();
                             
                             float target_scroll_y = scroll_y;
-                            if (line_y < scroll_y) {
-                                target_scroll_y = line_y;
-                            } else if (line_y + exact_item_height > scroll_y + window_h - ImGui::GetStyle().ScrollbarSize) {
-                                target_scroll_y = line_y + exact_item_height - window_h + ImGui::GetStyle().ScrollbarSize;
+                            if (line_y_d < (double)scroll_y) {
+                                target_scroll_y = (float)line_y_d;
+                            } else if (line_y_d + (double)exact_item_height > (double)scroll_y + (double)window_h - (double)ImGui::GetStyle().ScrollbarSize) {
+                                target_scroll_y = (float)(line_y_d + (double)exact_item_height - (double)window_h + (double)ImGui::GetStyle().ScrollbarSize);
                             }
                             if (target_scroll_y != scroll_y) {
                                 ImGui::SetScrollY(target_scroll_y);
@@ -1390,6 +1397,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                 int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);
                                 if (inline_edit_line != clicked_line) {
                                     if (!inline_edit_needs_refresh) {
+                                    printf("[DEBUG-TEXT] Selection finished, switching to inline edit at line %d\n", clicked_line);
                                         SwitchToLineEdit(clicked_line, cursor_pos);
                                     }
                                 } else {
@@ -1408,6 +1416,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                 ImGui::SetWindowFocus("TextChild");
                                 size_t offset = GetOffsetFromMouse();
                                 int clicked_line = doc->GetLineFromOffset(offset);
+                            printf("[DEBUG-TEXT] Mouse clicked at offset %zu (line %d)\n", offset, clicked_line);
                                 doc->select_start = doc->select_end = offset;
                                 is_selecting_text = true;
                                 int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);
@@ -1713,13 +1722,29 @@ int main(int /*argc*/, char** /*argv*/) {
                             }
                         }
 
-                        ImGuiListClipper clipper;
-                        clipper.Begin((int)doc->line_offsets.size(), exact_item_height);
-                        while (clipper.Step()) {
-                            for (int clipper_i = clipper.DisplayStart; clipper_i < clipper.DisplayEnd; clipper_i++) {
-                                size_t i = (size_t)clipper_i;
+                        // Expand scrollable area to support giant files without ImGuiListClipper float precision bugs
+                        double exact_total_height = (double)doc->line_offsets.size() * (double)exact_item_height;
+                                ImGui::SetCursorPosY(start_padding_y + (float)exact_total_height);
+                        ImGui::Dummy(ImVec2(0.0f, 0.0f));
 
-                                ImGui::SetCursorPosY(clipper_i * exact_item_height);
+                        double current_scroll_y = (double)ImGui::GetScrollY();
+                        double window_h = (double)ImGui::GetWindowHeight();
+
+                        int display_start = (int)(current_scroll_y / (double)exact_item_height);
+                        int display_end = display_start + (int)(window_h / (double)exact_item_height) + 2;
+
+                        if (display_start < 0) display_start = 0;
+                        if (display_end > (int)doc->line_offsets.size()) display_end = (int)doc->line_offsets.size();
+
+                                float precise_screen_x = ImGui::GetWindowPos().x + start_padding_x - ImGui::GetScrollX();
+
+                        for (int clipper_i = display_start; clipper_i < display_end; clipper_i++) {
+                            size_t i = (size_t)clipper_i;
+
+                            // Calculate precise layout screen placement using double subtraction to avoid float truncation
+                            double exact_local_y = (double)clipper_i * (double)exact_item_height;
+                                    float precise_screen_y = ImGui::GetWindowPos().y + start_padding_y + (float)(exact_local_y - current_scroll_y);
+                            ImGui::SetCursorScreenPos(ImVec2(precise_screen_x, precise_screen_y));
 
                                 size_t start = doc->line_offsets[i];
                                 size_t end = (i + 1 < doc->line_offsets.size()) ? doc->line_offsets[i + 1] : doc->size;
@@ -1882,7 +1907,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                     }
                                 }
                             }
-                        }
                         ImGui::PopFont();
                         ImGui::PopStyleVar();
                     }
