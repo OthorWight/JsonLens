@@ -250,7 +250,7 @@ struct LargeTextFile {
         }
     }
 
-    void Load(const char* filepath, bool allow_comments) {
+    void Load(const char* filepath, bool allow_comments, bool parse_ast = true) {
         ClearHistory();
         ClearGraph();
         if (data) { free(data); data = nullptr; }
@@ -284,22 +284,35 @@ struct LargeTextFile {
 
         Uint64 t1 = SDL_GetPerformanceCounter();
         load_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
-        Uint64 t2 = SDL_GetPerformanceCounter();
-        int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
-        root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
-        Uint64 t3 = SDL_GetPerformanceCounter();
-        parse_time_ms = (double)(t3 - t2) * 1000.0 / t_freq;
         Uint64 t4 = SDL_GetPerformanceCounter();
         BuildLineOffsets();
         Uint64 t5 = SDL_GetPerformanceCounter();
         index_time_ms = (double)(t5 - t4) * 1000.0 / t_freq;
         
-        // Free the scratch arena to release its high-water mark capacity back to the OS
-        arena_free(&scratch_arena);
-        arena_init(&scratch_arena);
-        
-        parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
-        RecomputeStats();
+        if (parse_ast) {
+            Uint64 t2 = SDL_GetPerformanceCounter();
+            int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
+            root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
+            Uint64 t3 = SDL_GetPerformanceCounter();
+            parse_time_ms = (double)(t3 - t2) * 1000.0 / t_freq;
+            
+            // Free the scratch arena to release its high-water mark capacity back to the OS
+            arena_free(&scratch_arena);
+            arena_init(&scratch_arena);
+            
+            parse_memory_bytes = GetArenaMemoryUsage(&main_arena) + GetArenaMemoryUsage(&scratch_arena);
+            RecomputeStats();
+        }
+    }
+
+    void FreeAST() {
+        ClearAstHistory();
+        ClearGraph();
+        root_json = nullptr;
+        arena_free(&main_arena); arena_init(&main_arena);
+        arena_free(&scratch_arena); arena_init(&scratch_arena);
+        parse_memory_bytes = 0;
+        ast_stats = JsonTreeStats();
     }
 
     void RebuildTextFromTree(bool use_tabs, int indent_step, bool keep_comments) {

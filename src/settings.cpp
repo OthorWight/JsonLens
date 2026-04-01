@@ -48,6 +48,9 @@ void AppSettings::Load() {
         }
         const char* folder = json_get_string(root, "last_folder", nullptr);
         if (folder) last_folder = folder;
+        show_text_view = json_get_bool(root, "show_text_view", true);
+        show_tree_view = json_get_bool(root, "show_tree_view", false);
+        show_graph_view = json_get_bool(root, "show_graph_view", false);
         graph_goto_target = (int)json_get_number(root, "graph_goto_target", 0.0);
         allow_comments = json_get_bool(root, "allow_comments", true);
         use_tabs = json_get_bool(root, "use_tabs", false);
@@ -77,6 +80,9 @@ void AppSettings::Save() const {
     json_add(&arena, root, "recent_files", recents);
     
     if (!last_folder.empty()) json_add_string(&arena, root, "last_folder", last_folder.c_str());
+    json_add_bool(&arena, root, "show_text_view", show_text_view);
+    json_add_bool(&arena, root, "show_tree_view", show_tree_view);
+    json_add_bool(&arena, root, "show_graph_view", show_graph_view);
     json_add_number(&arena, root, "graph_goto_target", (double)graph_goto_target);
     json_add_bool(&arena, root, "allow_comments", allow_comments);
     json_add_bool(&arena, root, "use_tabs", use_tabs);

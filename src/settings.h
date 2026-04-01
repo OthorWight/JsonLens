@@ -8,6 +8,9 @@ struct AppSettings {
     float zoom = 1.0f;
     std::vector<std::string> recent_files;
     std::string last_folder;
+    bool show_text_view = true;
+    bool show_tree_view = false;
+    bool show_graph_view = false;
     int graph_goto_target = 0; // 0 = Text View, 1 = Tree View
     bool allow_comments = true;
     bool use_tabs = false;
