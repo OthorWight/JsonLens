@@ -115,6 +115,7 @@ struct LargeTextFile {
     float graph_total_width = 0;
     float graph_total_height = 0;
     bool graph_dirty = true;
+    size_t graph_memory_bytes = 0;
     
     std::map<JsonValue*, size_t> graph_pagination;
 
@@ -209,6 +210,16 @@ struct LargeTextFile {
             graph_root = nullptr;
         }
         graph_total_width = graph_total_height = 0;
+        graph_memory_bytes = 0;
+    }
+
+    size_t CalculateGraphMemory(const GraphNode* node) const {
+        if (!node) return 0;
+        size_t mem = sizeof(GraphNode) + node->label.capacity() + node->children.capacity() * sizeof(GraphNode*);
+        for (auto child : node->children) {
+            mem += CalculateGraphMemory(child);
+        }
+        return mem;
     }
 
     void ClearTextHistory() {

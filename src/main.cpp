@@ -679,10 +679,28 @@ int main(int /*argc*/, char** /*argv*/) {
                     ImGui::Spacing();
                     ImGui::Text("Memory");
                     ImGui::Separator();
-                    size_t view_mem = doc->data_capacity + doc->line_offsets.capacity() * sizeof(size_t);
-                    ImGui::TextDisabled("View Buffer: %s", FormatMemory(view_mem).c_str());
-                    ImGui::TextDisabled("Parse Arena: %s (%zu Regions)", FormatMemory(doc->parse_memory_bytes).c_str(), GetArenaRegionCount(&doc->main_arena) + GetArenaRegionCount(&doc->scratch_arena));
-                    ImGui::TextDisabled("History Memory: %s (%zu Undo, %zu Redo)", FormatMemory(doc->GetHistoryMemoryUsage()).c_str(), doc->undo_stack.size(), doc->redo_stack.size());
+                    
+                    size_t text_buffer_mem = doc->data_capacity + doc->line_offsets.capacity() * sizeof(size_t);
+                    size_t history_mem = doc->GetHistoryMemoryUsage();
+                    size_t text_mem = text_buffer_mem + history_mem;
+                    size_t tree_mem = doc->parse_memory_bytes;
+                    size_t graph_mem = doc->graph_memory_bytes + doc->graph_pagination.size() * 48; // Approx map node overhead
+                    size_t total_mem = text_mem + tree_mem + graph_mem + sizeof(LargeTextFile);
+
+                    ImGui::TextDisabled("Text View: %s", FormatMemory(text_mem).c_str());
+                    ImGui::Indent();
+                    ImGui::TextDisabled("- Buffer & Offsets: %s", FormatMemory(text_buffer_mem).c_str());
+                    ImGui::TextDisabled("- History: %s (%zu Undo, %zu Redo)", FormatMemory(history_mem).c_str(), doc->undo_stack.size(), doc->redo_stack.size());
+                    ImGui::Unindent();
+
+                    ImGui::TextDisabled("Tree View (AST): %s", FormatMemory(tree_mem).c_str());
+                    ImGui::Indent();
+                    ImGui::TextDisabled("- Parse Arena: %s (%zu Regions)", FormatMemory(doc->parse_memory_bytes).c_str(), GetArenaRegionCount(&doc->main_arena) + GetArenaRegionCount(&doc->scratch_arena));
+                    ImGui::Unindent();
+
+                    ImGui::TextDisabled("Graph View: %s", FormatMemory(graph_mem).c_str());
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Total App Memory: %s", FormatMemory(total_mem).c_str());
                     ImGui::Spacing();
 
                     if (doc->root_json) {
@@ -1173,6 +1191,7 @@ int main(int /*argc*/, char** /*argv*/) {
                             doc->graph_total_width = max_x + 100.0f;
                             doc->graph_total_height = current_y + 40.0f;
                         }
+                        doc->graph_memory_bytes = doc->CalculateGraphMemory(doc->graph_root);
                         doc_graph_building = false;
                     });
                     }
