@@ -20,6 +20,8 @@
 #include "views.h"
 #include "document.h"
 
+constexpr const char* APP_TITLE = "JsonLens v0.1.0-alpha";
+
 struct PathToken {
     enum Type { Key, Index, Wildcard } type;
     std::string key;
@@ -146,7 +148,7 @@ int main(int /*argc*/, char** /*argv*/) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
     Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
-    SDL_Window* window = SDL_CreateWindow("JsonLens - Dear ImGui", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, settings.window_width, settings.window_height, window_flags);
+    SDL_Window* window = SDL_CreateWindow(APP_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, settings.window_width, settings.window_height, window_flags);
     if (settings.window_maximized) {
         SDL_MaximizeWindow(window);
     }
@@ -325,7 +327,6 @@ int main(int /*argc*/, char** /*argv*/) {
             if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
             std::string original_text(doc->data + start, text_end - start);
             if (strcmp(inline_edit_buf.data(), original_text.c_str()) != 0) {
-                printf("[DEBUG-TEXT] Applying inline edit to line %d\n", inline_edit_line);
                 doc->ReplaceLine(inline_edit_line, inline_edit_buf.data());
                 doc->ClearAstHistory();
                 text_dirty = true;
@@ -370,7 +371,7 @@ int main(int /*argc*/, char** /*argv*/) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
-            snprintf(title, sizeof(title), "JsonLens - %s", filepath_buffer);
+            snprintf(title, sizeof(title), "%s - %s", APP_TITLE, filepath_buffer);
             SDL_SetWindowTitle(window, title);
             settings.AddRecentFile(path);
             
@@ -404,7 +405,7 @@ int main(int /*argc*/, char** /*argv*/) {
         if (!path.empty() && !doc_loading && !doc_saving && !doc_formatting && doc->data) {
             snprintf(filepath_buffer, sizeof(filepath_buffer), "%s", path.c_str());
             char title[1024];
-            snprintf(title, sizeof(title), "JsonLens - %s", filepath_buffer);
+            snprintf(title, sizeof(title), "%s - %s", APP_TITLE, filepath_buffer);
             SDL_SetWindowTitle(window, title);
             settings.AddRecentFile(path);
 
@@ -596,7 +597,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     delete doc;
                     doc = new LargeTextFile();
                     filepath_buffer[0] = '\0';
-                    SDL_SetWindowTitle(window, "JsonLens - Dear ImGui");
+                    SDL_SetWindowTitle(window, APP_TITLE);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Quit", "Alt+F4")) done = true;
@@ -761,7 +762,7 @@ int main(int /*argc*/, char** /*argv*/) {
             delete doc;
             doc = new LargeTextFile();
             filepath_buffer[0] = '\0';
-            SDL_SetWindowTitle(window, "JsonLens - Dear ImGui");
+            SDL_SetWindowTitle(window, APP_TITLE);
         }
 
     if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
@@ -1177,7 +1178,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                     int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);
                                     if (inline_edit_line != clicked_line) {
                                         if (!inline_edit_needs_refresh) {
-                                        printf("[DEBUG-TEXT] Selection finished, switching to inline edit at line %d\n", clicked_line);
                                             SwitchToLineEdit(clicked_line, cursor_pos);
                                         }
                                     } else {
@@ -1196,7 +1196,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                     ImGui::SetWindowFocus("TextChild");
                                     size_t offset = GetOffsetFromMouse();
                                     int clicked_line = doc->GetLineFromOffset(offset);
-                                printf("[DEBUG-TEXT] Mouse clicked at offset %zu (line %d)\n", offset, clicked_line);
                                     doc->select_start = doc->select_end = offset;
                                     is_selecting_text = true;
                                     int cursor_pos = (int)(offset - doc->line_offsets[clicked_line]);

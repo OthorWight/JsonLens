@@ -347,7 +347,6 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
     }
     
     // Change Type Popup & Removal Logic
-    // ... [Content exactly matches the main.cpp equivalent you had written]
     if (ImGui::BeginPopupContextItem("node_context")) {
         ImGui::TextDisabled("Change Type");
         ImGui::Separator();
