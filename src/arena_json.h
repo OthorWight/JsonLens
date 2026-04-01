@@ -19,6 +19,10 @@
 #define ARENA_ALIGNMENT 8 
 #endif
 
+#ifndef ARENA_MAX_BLOCK_SIZE
+#define ARENA_MAX_BLOCK_SIZE (32 * 1024 * 1024) 
+#endif
+
 /* ============================================================================
  * ARENA ALLOCATOR
  * ============================================================================ */
@@ -231,6 +235,9 @@ void *arena_alloc_fallback(Arena *a, size_t size) {
     }
 
     size_t new_cap = a->end->capacity * 2;
+    if (new_cap > ARENA_MAX_BLOCK_SIZE) {
+        new_cap = ARENA_MAX_BLOCK_SIZE;
+    }
     if (aligned_size > new_cap) new_cap = aligned_size;
     if (new_cap < ARENA_DEFAULT_BLOCK_SIZE) new_cap = ARENA_DEFAULT_BLOCK_SIZE;
 
