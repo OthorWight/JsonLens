@@ -190,7 +190,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         current_path.push_back((size_t)node_index);
         ImGui::PushID(node_index);
     } else {
-        ImGui::PushID("Root");
+        ImGui::PushID(doc);
     }
 
     bool in_focus_path = false;
@@ -269,6 +269,8 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
 
     if (in_focus_path && is_container) {
         ImGui::SetNextItemOpen(true);
+    } else if (node_index == -1 && is_container) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Appearing);
     }
 
     switch (val->type) {
@@ -374,39 +376,13 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         bool is_obj = (val->type == JSON_OBJECT);
         int item_to_remove = -1;
         
-        const size_t chunk_size = doc->pagination_size;
-        for (size_t chunk_start = 0; chunk_start < val->as.list.count; chunk_start += chunk_size) {
-            size_t chunk_end = chunk_start + chunk_size;
-            if (chunk_end > val->as.list.count) chunk_end = val->as.list.count;
-            
-            bool show_chunk = true;
-            if (val->as.list.count > chunk_size) {
-                bool chunk_has_focus = false;
-                if (in_focus_path && focus_path.size() > 1 && actual_val != nullptr) {
-                    auto it = std::find(focus_path.begin(), focus_path.end(), actual_val);
-                    if (it != focus_path.end() && (it + 1) != focus_path.end()) {
-                        const JsonValue* next_in_path = *(it + 1);
-                        for (size_t i = chunk_start; i < chunk_end; i++) {
-                            if (&val->as.list.items[i].value == next_in_path) {
-                                chunk_has_focus = true; break;
-                            }
-                        }
-                    }
-                }
-                if (chunk_has_focus) ImGui::SetNextItemOpen(true);
-
-                char chunk_label[64];
-                snprintf(chunk_label, sizeof(chunk_label), is_obj ? "{...} [%zu - %zu]" : "[...] [%zu - %zu]", chunk_start, chunk_end - 1);
-                show_chunk = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<uintptr_t>(chunk_start)), ImGuiTreeNodeFlags_SpanAvailWidth, "%s", chunk_label);
-            }
-            
-            if (show_chunk) {
-                for (size_t i = chunk_start; i < chunk_end; i++) {
-                    int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], (int)i, current_path, focus_path, highlight_val, highlight_time, my_path);
-                    if (child_action & 1) action |= 1;
-                    if (child_action & 2) item_to_remove = (int)i; 
-                }
-                if (val->as.list.count > chunk_size) ImGui::TreePop();
+        ImGuiListClipper clipper;
+        clipper.Begin((int)val->as.list.count);
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                int child_action = DrawEditableJsonNode(doc, &val->as.list.items[i], i, current_path, focus_path, highlight_val, highlight_time, my_path);
+                if (child_action & 1) action |= 1;
+                if (child_action & 2) item_to_remove = i; 
             }
         }
         
