@@ -207,9 +207,6 @@ int main(int /*argc*/, char** /*argv*/) {
     JsonValue* tree_highlight_val = nullptr;
     double tree_highlight_time = 0.0;
 
-    int error_fix_line = -1;
-    std::vector<char> error_fix_buf;
-
     int inline_edit_line = -1;
     std::vector<char> inline_edit_buf;
     bool inline_edit_needs_refresh = false;
@@ -394,7 +391,7 @@ int main(int /*argc*/, char** /*argv*/) {
             doc_thread = std::thread([path, allow_comments, pagination_size, &doc_ready, &doc_loading]() {
                 LargeTextFile* new_doc = new LargeTextFile();
                 new_doc->pagination_size = pagination_size;
-                new_doc->Load(path.c_str(), allow_comments, false);
+                new_doc->Load(path.c_str(), allow_comments, true);
                 doc_ready = new_doc;
                 doc_loading = false;
             });
@@ -433,14 +430,17 @@ int main(int /*argc*/, char** /*argv*/) {
     auto FormatFile = [&](bool pretty) {
         if (!doc_loading && !doc_saving && !doc_formatting && doc->data) {
             if (doc->root_json == nullptr && doc->last_err.msg[0] != '\0') return;
+            ApplyInlineEdit();
             doc_formatting = true;
             if (doc_thread.joinable()) doc_thread.join();
             
             bool use_tabs = settings.use_tabs;
             int indent_size = settings.indent_size;
             bool keep_comments = settings.allow_comments;
-            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, keep_comments, &doc_formatting, &search_dirty]() {
-                if (doc->root_json == nullptr) {
+            bool need_ast_rebuild = text_dirty;
+            text_dirty = false;
+            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, keep_comments, need_ast_rebuild, &doc_formatting, &search_dirty]() {
+                if (doc->root_json == nullptr || need_ast_rebuild) {
                     doc->RebuildTreeFromText(keep_comments);
                 }
                 if (doc->root_json) {
@@ -492,6 +492,23 @@ int main(int /*argc*/, char** /*argv*/) {
         }
     };
 
+    // Lambda to re-parse the current text data in memory
+    auto RecheckParseError = [&]() {
+        if (!doc_loading && !doc_saving && !doc_formatting && doc->data) {
+            ApplyInlineEdit(); // Ensure any typed fixes are applied to doc->data
+            text_dirty = false; // Prevent redundant rebuilds since we are doing it right now
+            doc_formatting = true; // Use doc_formatting to indicate background work
+            if (doc_thread.joinable()) doc_thread.join();
+            bool allow_comments = settings.allow_comments;
+            doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() {
+                doc->last_err = JsonError{}; // Clear previous error before re-parsing
+                doc->RebuildTreeFromText(allow_comments);
+                doc_formatting = false;
+                search_dirty = true; // Re-evaluate search results after potential text changes
+            });
+        }
+    };
+
     bool done = false;
     bool was_formatting = false;
     while (!done) {
@@ -528,7 +545,6 @@ int main(int /*argc*/, char** /*argv*/) {
         if (LargeTextFile* ready_doc = doc_ready.exchange(nullptr)) {
             delete doc;
             doc = ready_doc;
-            error_fix_line = -1;
             if (doc->line_offsets.size() > 0 && doc->data) {
                 inline_edit_line = 0;
                 size_t start = doc->line_offsets[0];
@@ -681,7 +697,11 @@ int main(int /*argc*/, char** /*argv*/) {
             }
 
             if (ImGui::BeginMenu("Stats")) {
-                if (doc->data) {
+                if (doc_loading || doc_saving || doc_formatting || doc_graph_building) {
+                    ImGui::TextDisabled("Processing... Please wait.");
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Application FPS: %.1f", ImGui::GetIO().Framerate);
+                } else if (doc->data) {
                     ImGui::Text("Document");
                     ImGui::Separator();
                     ImGui::TextDisabled("File Size: %s", FormatMemory(doc->size).c_str());
@@ -818,50 +838,25 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui::Separator();
         }
 
-        if (!doc_loading && !doc_saving && !doc_formatting && doc->root_json == nullptr && doc->data != nullptr && doc->last_err.msg[0] != '\0') {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), "JSON Parse Error at Line %d, Col %d: %s", doc->last_err.line, doc->last_err.col, doc->last_err.msg);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                if (ImGui::IsMouseClicked(0)) {
-                    JumpToLine(doc->last_err.line - 1);
+        if (!doc_loading && !doc_saving && !doc_formatting && doc->root_json == nullptr && doc->last_err.msg[0] != '\0') {
+            if (doc->data != nullptr) {
+                ImGui::TextColored(ImVec4(1, 0, 0, 1), "JSON Parse Error at Line %d, Col %d: %s", doc->last_err.line, doc->last_err.col, doc->last_err.msg);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    if (ImGui::IsMouseClicked(0)) {
+                        JumpToLine(doc->last_err.line - 1);
+                    }
                 }
-            }
-            
-            int err_line_idx = doc->last_err.line - 1;
-            if (err_line_idx >= 0 && err_line_idx < (int)doc->line_offsets.size()) {
-                if (error_fix_line != err_line_idx) {
-                    size_t start = doc->line_offsets[err_line_idx];
-                    size_t end = (err_line_idx + 1 < (int)doc->line_offsets.size()) ? doc->line_offsets[err_line_idx + 1] : doc->size;
-                    size_t text_end = end;
-                    if (text_end > start && doc->data[text_end - 1] == '\n') text_end--;
-                    if (text_end > start && doc->data[text_end - 1] == '\r') text_end--;
-                    size_t len = text_end - start;
-                    
-                    error_fix_buf.resize(len + 8192); // Provide a generous 8KB buffer for typing edits
-                    memcpy(error_fix_buf.data(), doc->data + start, len);
-                    error_fix_buf[len] = '\0';
-                    error_fix_line = err_line_idx;
-                }
-                
-                bool apply_fix = false;
-                ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Apply Fix").x - style.ItemSpacing.x * 2.0f);
-                if (ImGui::InputText("##ErrorFix", error_fix_buf.data(), error_fix_buf.size(), ImGuiInputTextFlags_EnterReturnsTrue)) apply_fix = true;
-                ImGui::PopItemWidth();
                 ImGui::SameLine();
-                if (ImGui::Button("Apply Fix")) apply_fix = true;
-
-                if (apply_fix) {
-                    doc->ReplaceLine(err_line_idx, error_fix_buf.data());
-                    doc->ClearAstHistory();
-                    text_dirty = true;
-                    error_fix_line = -1;
+                if (ImGui::Button("Re-check")) {
+                    RecheckParseError();
                 }
+            } else {
+                ImGui::TextColored(ImVec4(1, 0, 0, 1), "File Error: %s", doc->last_err.msg);
             }
-        } else {
-            error_fix_line = -1;
         }
 
-        if (show_search_bar && doc->data) {
+        if (show_search_bar && doc->data && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
             ImGui::BeginChild("SearchAndReplace", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 2 + 8.0f), ImGuiChildFlags_Border);
@@ -1241,7 +1236,7 @@ int main(int /*argc*/, char** /*argv*/) {
                             }
 
                             bool has_selection = (doc->select_start != (size_t)-1 && doc->select_start != doc->select_end);
-                            if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && (inline_edit_line != -1 || has_selection)) {
+                            if (ImGui::IsWindowFocused() && (inline_edit_line != -1 || has_selection)) {
                                 bool selection_handled = false;
                                 if (has_selection) {
                                     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_Home) || ImGui::IsKeyPressed(ImGuiKey_PageUp)) {
@@ -1280,13 +1275,27 @@ int main(int /*argc*/, char** /*argv*/) {
                                     SwitchToLineEdit(target, inline_edit_cursor_pos);
                                     ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
                                 }
-                                else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && inline_edit_line != -1 && inline_edit_cursor_pos > 0) {
-                                    inline_edit_cursor_pos--;
-                                    ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) && inline_edit_line != -1) {
+                                    if (inline_edit_cursor_pos > 0) {
+                                        inline_edit_cursor_pos--;
+                                        ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                    } else if (inline_edit_line > 0) {
+                                        int target = inline_edit_line - 1;
+                                        ApplyInlineEdit();
+                                        SwitchToLineEdit(target, INT_MAX);
+                                        ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                                    }
                                 }
-                                else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && inline_edit_line != -1 && inline_edit_cursor_pos < (int)strlen(inline_edit_buf.data())) {
-                                    inline_edit_cursor_pos++;
-                                    ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) && inline_edit_line != -1) {
+                                    if (inline_edit_cursor_pos < (int)strlen(inline_edit_buf.data())) {
+                                        inline_edit_cursor_pos++;
+                                        ScrollToKeepCursorVisible(inline_edit_line, inline_edit_cursor_pos);
+                                    } else if (inline_edit_line < (int)doc->line_offsets.size() - 1) {
+                                        int target = inline_edit_line + 1;
+                                        ApplyInlineEdit();
+                                        SwitchToLineEdit(target, 0);
+                                        ScrollToKeepCursorVisible(target, inline_edit_cursor_pos);
+                                    }
                                 }
                                 else if (ImGui::IsKeyPressed(ImGuiKey_Home) && inline_edit_line != -1) {
                                     if (ImGui::GetIO().KeyCtrl) {
@@ -1666,7 +1675,7 @@ int main(int /*argc*/, char** /*argv*/) {
                                         
                                         if (first) ImGui::TextUnformatted("");
                                     
-                                    if (inline_edit_line == (int)i && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+                                    if (inline_edit_line == (int)i && ImGui::IsWindowFocused()) {
                                         static double last_cursor_time = 0.0;
                                         static int last_cursor_pos_track = -1;
                                         if (last_cursor_pos_track != inline_edit_cursor_pos) {

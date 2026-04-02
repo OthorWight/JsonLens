@@ -258,27 +258,43 @@ struct LargeTextFile {
         arena_free(&main_arena); arena_free(&scratch_arena);
         arena_init(&main_arena); arena_init(&scratch_arena);
         root_json = nullptr;
+        last_err = JsonError{};
         load_time_ms = parse_time_ms = index_time_ms = format_time_ms = 0;
         parse_memory_bytes = 0;
         
         Uint64 t_freq = SDL_GetPerformanceFrequency();
         Uint64 t0 = SDL_GetPerformanceCounter();
         FILE* f = fopen(filepath, "rb");
-        if (!f) return;
+        if (!f) {
+            snprintf(last_err.msg, sizeof(last_err.msg), "Failed to open file: %s", filepath);
+            return;
+        }
         fseek(f, 0, SEEK_END);
         long fsize = ftell(f);
-        if (fsize < 0) { fclose(f); return; }
+        if (fsize < 0) { 
+            snprintf(last_err.msg, sizeof(last_err.msg), "Failed to determine file size: %s", filepath);
+            fclose(f); 
+            return; 
+        }
         size = (size_t)fsize;
         fseek(f, 0, SEEK_SET);
-        if (size > SIZE_MAX - 1024 * 1024) { fclose(f); return; }
+        if (size > SIZE_MAX - 1024 * 1024) { 
+            snprintf(last_err.msg, sizeof(last_err.msg), "File too large to allocate: %s", filepath);
+            fclose(f); 
+            return; 
+        }
         data_capacity = size + 1024 * 1024;
         data = static_cast<char*>(malloc(data_capacity));
         if (data) {
             size_t bytes_read = fread(data, 1, size, f);
+            if (bytes_read < size && ferror(f)) {
+                snprintf(last_err.msg, sizeof(last_err.msg), "Error reading file: %s", filepath);
+            }
             data[bytes_read] = '\0';
             size = bytes_read;
         } else {
             size = 0;
+            snprintf(last_err.msg, sizeof(last_err.msg), "Failed to allocate memory for file");
         }
         fclose(f);
 
@@ -329,7 +345,8 @@ struct LargeTextFile {
                 char* new_data = static_cast<char*>(realloc(data, data_capacity));
                 if (new_data) data = new_data; else return;
             }
-            strcpy(data, new_text);
+            memcpy(data, new_text, new_len);
+            data[new_len] = '\0';
             size = new_len;
             Uint64 t1 = SDL_GetPerformanceCounter();
             format_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
@@ -431,7 +448,7 @@ struct LargeTextFile {
         arena_init(&main_arena); arena_init(&scratch_arena);
         int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
         root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
-        BuildLineOffsets(); ClearGraph(); tree_dirty = false; graph_dirty = true;
+        ClearGraph(); tree_dirty = false; graph_dirty = true;
         Uint64 t1 = SDL_GetPerformanceCounter();
         parse_time_ms = (double)(t1 - t0) * 1000.0 / t_freq;
         
