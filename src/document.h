@@ -116,8 +116,6 @@ struct LargeTextFile {
     float graph_total_height = 0;
     bool graph_dirty = true;
     size_t graph_memory_bytes = 0;
-    
-    std::map<JsonValue*, size_t> graph_pagination;
 
     bool tree_dirty = false;
     bool is_pretty = true;
@@ -128,8 +126,6 @@ struct LargeTextFile {
     double format_time_ms = 0;
     size_t parse_memory_bytes = 0;
     
-    int pagination_size = 2000;
-
     JsonTreeStats ast_stats;
     size_t max_line_length = 0;
 
@@ -418,7 +414,7 @@ struct LargeTextFile {
             if (rec.action == UndoActionType::SetNode) {
                 JsonNode current_root_node = JsonNode{}; current_root_node.value = *root_json;
                 opposite_stack.push_back({ UndoActionType::SetNode, rec.path, current_root_node, {} });
-                *root_json = rec.saved_node.value; tree_dirty = true; graph_dirty = true; graph_pagination.clear();
+                *root_json = rec.saved_node.value; tree_dirty = true; graph_dirty = true;
             }
             return false;
         }
@@ -428,15 +424,15 @@ struct LargeTextFile {
         if (rec.action == UndoActionType::SetNode) {
             if (target_idx < parent->as.list.count) {
                 opposite_stack.push_back({ UndoActionType::SetNode, rec.path, parent->as.list.items[target_idx], {} });
-                parent->as.list.items[target_idx] = rec.saved_node; tree_dirty = true; graph_dirty = true; graph_pagination.clear();
+                parent->as.list.items[target_idx] = rec.saved_node; tree_dirty = true; graph_dirty = true;
             }
         } else if (rec.action == UndoActionType::InsertNode) {
             opposite_stack.push_back({ UndoActionType::RemoveNode, rec.path, JsonNode{}, {} });
-            JsonInsertAtIndex(&main_arena, parent, target_idx, rec.saved_node); tree_dirty = true; graph_dirty = true; graph_pagination.clear();
+            JsonInsertAtIndex(&main_arena, parent, target_idx, rec.saved_node); tree_dirty = true; graph_dirty = true;
         } else if (rec.action == UndoActionType::RemoveNode) {
             if (target_idx < parent->as.list.count) {
                 opposite_stack.push_back({ UndoActionType::InsertNode, rec.path, parent->as.list.items[target_idx], {} });
-                JsonRemoveAtIndex(parent, target_idx); tree_dirty = true; graph_dirty = true; graph_pagination.clear();
+                JsonRemoveAtIndex(parent, target_idx); tree_dirty = true; graph_dirty = true;
             }
         }
         return false;

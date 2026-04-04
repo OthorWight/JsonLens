@@ -55,7 +55,6 @@ void AppSettings::Load() {
         allow_comments = json_get_bool(root, "allow_comments", true);
         use_tabs = json_get_bool(root, "use_tabs", false);
         indent_size = (int)json_get_number(root, "indent_size", 2.0);
-        pagination_size = (int)json_get_number(root, "pagination_size", 2000.0);
         default_view = (int)json_get_number(root, "default_view", 0.0);
         window_width = (int)json_get_number(root, "window_width", 1280.0);
         window_height = (int)json_get_number(root, "window_height", 720.0);
@@ -87,7 +86,6 @@ void AppSettings::Save() const {
     json_add_bool(&arena, root, "allow_comments", allow_comments);
     json_add_bool(&arena, root, "use_tabs", use_tabs);
     json_add_number(&arena, root, "indent_size", (double)indent_size);
-    json_add_number(&arena, root, "pagination_size", (double)pagination_size);
     json_add_number(&arena, root, "default_view", (double)default_view);
     json_add_number(&arena, root, "window_width", (double)window_width);
     json_add_number(&arena, root, "window_height", (double)window_height);

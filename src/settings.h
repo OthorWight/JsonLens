@@ -15,7 +15,6 @@ struct AppSettings {
     bool allow_comments = true;
     bool use_tabs = false;
     int indent_size = 2;
-    int pagination_size = 2000;
     int default_view = 0; // 0 = Text, 1 = Tree, 2 = Graph
     int window_width = 1280;
     int window_height = 720;

@@ -20,7 +20,7 @@
 #include "views.h"
 #include "document.h"
 
-constexpr const char* APP_TITLE = "JsonLens v0.1.0-alpha";
+constexpr const char* APP_TITLE = "JsonLens v0.1.1-alpha";
 
 struct PathToken {
     enum Type { Key, Index, Wildcard } type;
@@ -282,11 +282,6 @@ int main(int /*argc*/, char** /*argv*/) {
                 } else if (active_view == ActiveView::Graph) {
                     settings.show_graph_view = true;
                     force_graph_tab = true;
-                    for (size_t i = 0; i < best_path.size() - 1; ++i)
-                        if (best_path[i]->type == JSON_OBJECT || best_path[i]->type == JSON_ARRAY)
-                            for (size_t j = 0; j < best_path[i]->as.list.count; ++j)
-                                if (&best_path[i]->as.list.items[j].value == best_path[i+1])
-                                    doc->graph_pagination[best_path[i]] = (j / doc->pagination_size) * doc->pagination_size;
                     doc->graph_dirty = true;
                 }
             } else JumpToLine(doc->GetLineFromOffset(offset));
@@ -388,10 +383,8 @@ int main(int /*argc*/, char** /*argv*/) {
             if (doc_thread.joinable()) doc_thread.join();
             
             bool allow_comments = settings.allow_comments;
-            int pagination_size = settings.pagination_size;
-            doc_thread = std::thread([path, allow_comments, pagination_size, &doc_ready, &doc_loading]() {
+            doc_thread = std::thread([path, allow_comments, &doc_ready, &doc_loading]() {
                 LargeTextFile* new_doc = new LargeTextFile();
-                new_doc->pagination_size = pagination_size;
                 new_doc->Load(path.c_str(), allow_comments, true);
                 doc_ready = new_doc;
                 doc_loading = false;
@@ -479,16 +472,6 @@ int main(int /*argc*/, char** /*argv*/) {
             tree_focus_frames = 3;
             
             if (active_view == ActiveView::Graph) {
-                for (size_t i = 0; i < tree_focus_path.size() - 1; ++i) {
-                    if (tree_focus_path[i]->type == JSON_OBJECT || tree_focus_path[i]->type == JSON_ARRAY) {
-                        for (size_t j = 0; j < tree_focus_path[i]->as.list.count; ++j) {
-                            if (&tree_focus_path[i]->as.list.items[j].value == tree_focus_path[i+1]) {
-                                doc->graph_pagination[tree_focus_path[i]] = (j / doc->pagination_size) * doc->pagination_size;
-                                break;
-                            }
-                        }
-                    }
-                }
                 doc->graph_dirty = true;
             }
         }
@@ -678,16 +661,6 @@ int main(int /*argc*/, char** /*argv*/) {
                 if (!settings.use_tabs) {
                     if (ImGui::SliderInt("Indent Size", &settings.indent_size, 1, 8)) settings.Save();
                 }
-                
-                ImGui::Separator();
-                ImGui::TextDisabled("Performance");
-                if (ImGui::SliderInt("Pagination Size", &settings.pagination_size, 100, 10000)) {
-                    settings.Save();
-                    if (doc) {
-                        doc->pagination_size = settings.pagination_size;
-                        doc->graph_dirty = true;
-                    }
-                }
                 ImGui::EndMenu();
             }
             
@@ -724,7 +697,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     size_t history_mem = doc->GetHistoryMemoryUsage();
                     size_t text_mem = text_buffer_mem + history_mem;
                     size_t tree_mem = doc->parse_memory_bytes;
-                    size_t graph_mem = doc->graph_memory_bytes + doc->graph_pagination.size() * 48; // Approx map node overhead
+                    size_t graph_mem = doc->graph_memory_bytes;
                     size_t total_mem = text_mem + tree_mem + graph_mem + sizeof(LargeTextFile);
 
                     ImGui::TextDisabled("Text View: %s", FormatMemory(text_mem).c_str());
@@ -1958,15 +1931,6 @@ int main(int /*argc*/, char** /*argv*/) {
                                     tree_focus_frames = 3;
                                 }
                             }
-                        } else if (ImGui::IsMouseClicked(0)) {
-                            if (hovered_node->type == GraphNodeType::PrevPage) {
-                                if (doc->graph_pagination[hovered_node->source_val] >= (size_t)doc->pagination_size)
-                                    doc->graph_pagination[hovered_node->source_val] -= doc->pagination_size;
-                                else doc->graph_pagination[hovered_node->source_val] = 0;
-                            } else if (hovered_node->type == GraphNodeType::NextPage) {
-                                doc->graph_pagination[hovered_node->source_val] += hovered_node->page_step;
-                            }
-                            doc->graph_dirty = true;
                         }
                     }
                 } else {
