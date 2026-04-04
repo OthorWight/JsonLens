@@ -47,6 +47,7 @@ struct ArenaRegion {
 typedef struct Arena {
     ArenaRegion *begin;
     ArenaRegion *end;
+    uint64_t _inline_buffer[(sizeof(ArenaRegion) + 1024 + 7) / 8];
 } Arena;
 
 typedef struct ArenaTemp {
@@ -66,6 +67,18 @@ void arena_reset(Arena *a);
 void arena_free(Arena *a);
 
 static inline void *arena_alloc(Arena *a, size_t size) {
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_expect(size == 0, 0)) return NULL;
+    size_t aligned_size = (size + (ARENA_ALIGNMENT - 1)) & ~(ARENA_ALIGNMENT - 1);
+    if (__builtin_expect(a->end != NULL, 1)) {
+        size_t new_count = a->end->count + aligned_size;
+        if (__builtin_expect(new_count <= a->end->capacity, 1)) {
+            void *ptr = a->end->data + a->end->count;
+            a->end->count = new_count;
+            return ptr;
+        }
+    }
+#else
     if (size == 0) return NULL;
     size_t aligned_size = (size + (ARENA_ALIGNMENT - 1)) & ~(ARENA_ALIGNMENT - 1);
     if (a->end) {
@@ -76,6 +89,7 @@ static inline void *arena_alloc(Arena *a, size_t size) {
             return ptr;
         }
     }
+#endif
     return arena_alloc_fallback(a, size);
 }
 
@@ -176,11 +190,11 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val);
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
-#include <assert.h>
-#include <strings.h> /* for strcasecmp */
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <tmmintrin.h>
+#include <emmintrin.h>
+#include <smmintrin.h>
 #endif
 
 /* --- Arena Implementation --- */
@@ -197,8 +211,13 @@ static ArenaRegion *arena__new_region(size_t capacity) {
 }
 
 void arena_init(Arena *a) {
-    a->begin = NULL;
-    a->end = NULL;
+    ArenaRegion *inline_reg = (ArenaRegion *)a->_inline_buffer;
+    inline_reg->next = NULL;
+    inline_reg->capacity = 1024;
+    inline_reg->count = 0;
+    inline_reg->_padding = 0;
+    a->begin = inline_reg;
+    a->end = inline_reg;
 }
 
 void *arena_alloc_fallback(Arena *a, size_t size) {
@@ -209,10 +228,12 @@ void *arena_alloc_fallback(Arena *a, size_t size) {
             a->end = a->begin;
             a->end->count = 0;
         } else {
-            size_t cap = ARENA_DEFAULT_BLOCK_SIZE;
-            if (aligned_size > cap) cap = aligned_size;
-            a->begin = arena__new_region(cap);
-            if (!a->begin) return NULL;
+            ArenaRegion *inline_reg = (ArenaRegion *)a->_inline_buffer;
+            inline_reg->next = NULL;
+            inline_reg->capacity = 1024;
+            inline_reg->count = 0;
+            inline_reg->_padding = 0;
+            a->begin = inline_reg;
             a->end = a->begin;
         }
         if (a->end->count + aligned_size <= a->end->capacity) {
@@ -267,9 +288,12 @@ void arena_reset(Arena *a) {
 
 void arena_free(Arena *a) {
     ArenaRegion *curr = a->begin;
+    ArenaRegion *inline_reg = (ArenaRegion *)a->_inline_buffer;
     while (curr) {
         ArenaRegion *next = curr->next;
-        free(curr);
+        if (curr != inline_reg) {
+            free(curr);
+        }
         curr = next;
     }
     a->begin = NULL;
@@ -314,6 +338,106 @@ typedef struct {
     char *inline_comment;
 } ParseState;
 
+/* --- High-Performance Parsing Helpers --- */
+
+static inline bool is_made_of_eight_digits_fast(const uint8_t *chars) {
+    uint64_t val;
+    memcpy(&val, chars, 8);
+    return (((val & 0xF0F0F0F0F0F0F0F0) |
+             (((val + 0x0606060606060606) & 0xF0F0F0F0F0F0F0F0) >> 4)) ==
+            0x3333333333333333);
+}
+
+static inline uint32_t parse_eight_digits(const uint8_t *chars) {
+    uint64_t val;
+    memcpy(&val, chars, 8);
+    val = (val & 0x0F0F0F0F0F0F0F0F) * 2561 >> 8;
+    val = (val & 0x00FF00FF00FF00FF) * 6553601 >> 16;
+    return (uint32_t)((val & 0x0000FFFF0000FFFF) * 42949672960001 >> 32);
+}
+
+static const double power_of_ten[] = {
+    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+    1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
+};
+
+static inline bool parse_number_fast_path(ParseState *s, double *out_dbl) {
+    const char *p = s->curr;
+    bool negative = (*p == '-');
+    if (negative) p++;
+
+    if (p >= s->end) return false;
+
+    uint64_t i = 0;
+    if (*p == '0') {
+        p++;
+        if (p < s->end && *p >= '0' && *p <= '9') return false;
+    } else if (*p >= '1' && *p <= '9') {
+        // SWAR parsing: 8 digits at a time!
+        while (p + 8 <= s->end && is_made_of_eight_digits_fast((const uint8_t*)p)) {
+            i = i * 100000000 + parse_eight_digits((const uint8_t*)p);
+            p += 8;
+        }
+        while (p < s->end && *p >= '0' && *p <= '9') {
+            i = i * 10 + (*p - '0');
+            p++;
+        }
+    } else {
+        return false;
+    }
+
+    int64_t exponent = 0;
+    bool is_float = false;
+
+    if (p < s->end && *p == '.') {
+        is_float = true;
+        p++;
+        const char *frac_start = p;
+        while (p + 8 <= s->end && is_made_of_eight_digits_fast((const uint8_t*)p)) {
+            i = i * 100000000 + parse_eight_digits((const uint8_t*)p);
+            p += 8;
+        }
+        while (p < s->end && *p >= '0' && *p <= '9') {
+            i = i * 10 + (*p - '0');
+            p++;
+        }
+        if (p == frac_start) return false;
+        exponent -= (p - frac_start);
+    }
+
+    if (p < s->end && (*p == 'e' || *p == 'E')) {
+        is_float = true;
+        p++;
+        bool exp_neg = false;
+        if (p < s->end && (*p == '-' || *p == '+')) { exp_neg = (*p == '-'); p++; }
+        uint64_t exp_val = 0;
+        const char *exp_start = p;
+        while (p < s->end && *p >= '0' && *p <= '9') {
+            exp_val = exp_val * 10 + (*p - '0');
+            p++;
+        }
+        if (p == exp_start) return false;
+        exponent += exp_neg ? -exp_val : exp_val;
+    }
+
+    if (is_float) {
+        // Fast-path: Exponent within standard double precision limits
+        if (exponent >= -22 && exponent <= 22 && i <= 9007199254740991ULL) {
+            double d = (double)i;
+            if (exponent < 0) d /= power_of_ten[-exponent];
+            else d *= power_of_ten[exponent];
+            *out_dbl = negative ? -d : d;
+            s->curr = p;
+            return true;
+        }
+        return false; // Requires strtod/fallback!
+    } else {
+        *out_dbl = negative ? -(double)i : (double)i;
+        s->curr = p;
+        return true; 
+    }
+}
+
 typedef struct NodeBlock NodeBlock;
 struct NodeBlock {
     JsonNode *items;
@@ -340,7 +464,11 @@ static void set_error(ParseState *s, const char *fmt, ...) {
 
 static void advance(ParseState *s, int n) { s->curr += n; }
 
-static const unsigned char ws_lut[256] = { [' '] = 1, ['\n'] = 1, ['\r'] = 1, ['\t'] = 1 };
+static const unsigned char ws_lut[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, /* \t, \n, \r */
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0  /* Space */
+};
 
 static void skip_whitespace(ParseState *s) {
     const char *p = s->curr;
@@ -348,24 +476,6 @@ static void skip_whitespace(ParseState *s) {
 
     if (!(s->flags & JSON_PARSE_ALLOW_COMMENTS)) {
         if (p < end && !ws_lut[(unsigned char)*p]) return; // Fast reject for minified JSON
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-        const __m128i v_sp  = _mm_set1_epi8(' ');
-        const __m128i v_lf  = _mm_set1_epi8('\n');
-        const __m128i v_cr  = _mm_set1_epi8('\r');
-        const __m128i v_tab = _mm_set1_epi8('\t');
-        while (p + 16 <= end) {
-            __m128i data = _mm_loadu_si128((const __m128i *)p);
-            __m128i is_ws = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(data, v_sp), _mm_cmpeq_epi8(data, v_lf)), 
-                                         _mm_or_si128(_mm_cmpeq_epi8(data, v_cr), _mm_cmpeq_epi8(data, v_tab)));
-            uint32_t mask = (uint32_t)_mm_movemask_epi8(is_ws);
-            if (mask != 0xFFFF) {
-                p += __builtin_ctz(~mask);
-                s->curr = p;
-                return;
-            }
-            p += 16;
-        }
-#endif
         while (p < end && ws_lut[(unsigned char)*p]) p++;
         s->curr = p;
         return;
@@ -383,25 +493,6 @@ static void skip_whitespace(ParseState *s) {
     while (1) {
         p = s->curr;
         const char *p_start = p;
-
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-        const __m128i v_sp  = _mm_set1_epi8(' ');
-        const __m128i v_lf  = _mm_set1_epi8('\n');
-        const __m128i v_cr  = _mm_set1_epi8('\r');
-        const __m128i v_tab = _mm_set1_epi8('\t');
-
-        while (p + 16 <= end) {
-            __m128i data = _mm_loadu_si128((const __m128i *)p);
-            __m128i is_ws = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(data, v_sp), _mm_cmpeq_epi8(data, v_lf)), 
-                                         _mm_or_si128(_mm_cmpeq_epi8(data, v_cr), _mm_cmpeq_epi8(data, v_tab)));
-            uint32_t mask = (uint32_t)_mm_movemask_epi8(is_ws);
-            if (mask != 0xFFFF) {
-                p += __builtin_ctz(~mask);
-                break;
-            }
-            p += 16;
-        }
-#endif
         while (p < end && ws_lut[(unsigned char)*p]) p++;
         
         if (!seen_newline) {
@@ -548,6 +639,17 @@ static char *combine_comments(Arena *a, const char *inline_comm, const char *las
 
 static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int depth);
 
+static const unsigned char string_stop_table[256] = {
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+
 static bool parse_string(Arena *a, ParseState *s, char **out_str) {
     advance(s, 1); 
     const char *start_content = s->curr;
@@ -555,35 +657,41 @@ static bool parse_string(Arena *a, ParseState *s, char **out_str) {
     bool has_escapes = false;
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-    const __m128i v_quote = _mm_set1_epi8('"');
-    const __m128i v_esc   = _mm_set1_epi8('\\');
-    const __m128i v_ctrl_threshold = _mm_set1_epi8(0x20);
-    const __m128i v_zero  = _mm_setzero_si128();
+    if (s->end - scan >= 16) {
+        const __m128i v_quote = _mm_set1_epi8('"');
+        const __m128i v_esc   = _mm_set1_epi8('\\');
+        const __m128i v_ctrl_threshold = _mm_set1_epi8(0x20);
+        const __m128i v_zero  = _mm_setzero_si128();
 
-    while (scan + 16 <= s->end) {
-        __m128i data = _mm_loadu_si128((const __m128i *)scan);
-        __m128i is_quote = _mm_cmpeq_epi8(data, v_quote);
-        __m128i is_esc   = _mm_cmpeq_epi8(data, v_esc);
-        __m128i under_20 = _mm_subs_epu8(v_ctrl_threshold, data);
-        __m128i is_ctrl  = _mm_andnot_si128(_mm_cmpeq_epi8(under_20, v_zero), _mm_set1_epi8(-1));
-        
-        __m128i match = _mm_or_si128(is_quote, _mm_or_si128(is_esc, is_ctrl));
-        uint32_t mask = (uint32_t)_mm_movemask_epi8(match);
-        if (mask != 0) {
-            scan += __builtin_ctz(mask);
-            break;
+        while (scan + 16 <= s->end) {
+            __m128i data = _mm_loadu_si128((const __m128i *)scan);
+            __m128i is_quote = _mm_cmpeq_epi8(data, v_quote);
+            __m128i is_esc   = _mm_cmpeq_epi8(data, v_esc);
+            __m128i under_20 = _mm_subs_epu8(v_ctrl_threshold, data);
+            __m128i is_ctrl  = _mm_andnot_si128(_mm_cmpeq_epi8(under_20, v_zero), _mm_set1_epi8(-1));
+            
+            __m128i match = _mm_or_si128(is_quote, _mm_or_si128(is_esc, is_ctrl));
+            uint32_t mask = (uint32_t)_mm_movemask_epi8(match);
+            if (mask != 0) {
+                scan += __builtin_ctz(mask);
+                break;
+            }
+            scan += 16;
         }
-        scan += 16;
     }
 #endif
     while (scan < s->end) {
+        while (scan < s->end && !string_stop_table[(unsigned char)*scan]) {
+            scan++;
+        }
+        if (scan >= s->end) break;
         unsigned char c = (unsigned char)*scan;
         if (c == '"') break;
-        else if (c == '\\') {
+        if (c == '\\') {
             has_escapes = true;
             scan++; 
             if (scan >= s->end) { set_error(s, "Unterminated escape"); return false; }
-        } else if (c < 0x20) {
+        } else {
             set_error(s, "Control character in string"); return false;
         }
         scan++;
@@ -710,13 +818,15 @@ static bool parse_string(Arena *a, ParseState *s, char **out_str) {
 }
 
 static bool parse_number(ParseState *s, double *out_num) {
+    if (parse_number_fast_path(s, out_num)) return true;
+
     const char *p = s->curr;
     int64_t mantissa = 0;
     int exponent = 0;
     int sign = 1;
 
     if (p < s->end && *p == '-') { sign = -1; p++; }
-    if (p >= s->end) return false;
+    if (p >= s->end) { set_error(s, "Unexpected end"); return false; }
 
     if (*p == '0') {
         p++;
@@ -756,19 +866,26 @@ static bool parse_number(ParseState *s, double *out_num) {
             e_val = e_val * 10 + (*p - '0');
             p++;
         }
-        if (p == exp_start) return false;
+        if (p == exp_start) { set_error(s, "Expected digit in exponent"); return false; }
         exponent += (e_val * exp_sign);
     }
 
     double val = (double)mantissa;
     if (exponent != 0) {
-        static const double pow10[] = {
-            1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10,
-            1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
-        };
-        if (exponent < 0 && -exponent <= 22) { val /= pow10[-exponent]; } 
-        else if (exponent > 0 && exponent <= 22) { val *= pow10[exponent]; } 
-        else { val *= pow(10.0, (double)exponent); }
+        if (exponent < 0 && -exponent <= 22) { val /= power_of_ten[-exponent]; } 
+        else if (exponent > 0 && exponent <= 22) { val *= power_of_ten[exponent]; } 
+        else { 
+            double p = 1.0;
+            double base = 10.0;
+            int e = exponent < 0 ? -exponent : exponent;
+            while (e > 0) {
+                if (e & 1) p *= base;
+                base *= base;
+                e >>= 1;
+            }
+            if (exponent < 0) val /= p;
+            else val *= p;
+        }
     }
 
     *out_num = val * sign;
@@ -788,17 +905,21 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
         advance(s, 1);
         arr->as.list.count = 0;
         arr->as.list.items = NULL;
-        arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
-        s->last_comment = NULL;
-        s->inline_comment = NULL;
+        if (s->inline_comment || s->last_comment) {
+            arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+            s->last_comment = NULL;
+            s->inline_comment = NULL;
+        } else {
+            arr->post_comment = NULL;
+        }
         return true;
     }
 
     ArenaTemp temp_mem = arena_temp_begin(s->scratch);
     
-    JsonNode first_items[8];
+    JsonNode first_items[16];
     NodeBlock head;
-    head.capacity = 8; // Start small for micro-payloads directly on the stack
+    head.capacity = 16; // Start small for micro-payloads directly on the stack
     head.count = 0;
     head.next = NULL;
     head.items = first_items;
@@ -811,7 +932,7 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
             if (!next_block) return false;
             next_block->capacity = curr_block->capacity * 2;
-            if (next_block->capacity > 1024) next_block->capacity = 1024;
+            if (next_block->capacity > 32768) next_block->capacity = 32768;
             next_block->count = 0;
             next_block->next = NULL;
             next_block->items = arena_alloc_array(s->scratch, JsonNode, next_block->capacity);
@@ -839,6 +960,8 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
             node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
             strcpy(node->value.trailing_comment, s->inline_comment);
             s->inline_comment = NULL;
+        } else {
+            node->value.trailing_comment = NULL;
         }
 
         char c = *s->curr;
@@ -865,18 +988,26 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
                 
                 if (s->curr < s->end && *s->curr == ']') {
                     advance(s, 1);
+                    if (s->inline_comment || s->last_comment) {
                     arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
                     s->last_comment = NULL;
                     s->inline_comment = NULL;
+                } else {
+                    arr->post_comment = NULL;
+                }
                     break;
                 }
             }
         } 
         else if (c == ']') { 
             advance(s, 1); 
+            if (s->inline_comment || s->last_comment) {
             arr->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
             s->last_comment = NULL;
             s->inline_comment = NULL;
+        } else {
+            arr->post_comment = NULL;
+        }
             break; 
         } 
         else { set_error(s, "Expected ',' or ']'"); return false; }
@@ -916,17 +1047,21 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         advance(s, 1);
         obj->as.list.count = 0;
         obj->as.list.items = NULL;
-        obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
-        s->last_comment = NULL;
-        s->inline_comment = NULL;
+        if (s->inline_comment || s->last_comment) {
+            obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
+            s->last_comment = NULL;
+            s->inline_comment = NULL;
+        } else {
+            obj->post_comment = NULL;
+        }
         return true;
     }
 
     ArenaTemp temp_mem = arena_temp_begin(s->scratch);
     
-    JsonNode first_items[8];
+    JsonNode first_items[16];
     NodeBlock head;
-    head.capacity = 8; // Start small for micro-payloads directly on the stack
+    head.capacity = 16; // Start small for micro-payloads directly on the stack
     head.count = 0;
     head.next = NULL;
     head.items = first_items;
@@ -939,15 +1074,18 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
         if (*s->curr != '"') { set_error(s, "Expected key"); return false; }
 
-        char *key_comment = combine_comments(main, s->inline_comment, s->last_comment);
-        s->last_comment = NULL;
-        s->inline_comment = NULL;
+        char *key_comment = NULL;
+        if (s->inline_comment || s->last_comment) {
+            key_comment = combine_comments(main, s->inline_comment, s->last_comment);
+            s->last_comment = NULL;
+            s->inline_comment = NULL;
+        }
 
         if (curr_block->count == curr_block->capacity) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
             if (!next_block) return false;
             next_block->capacity = curr_block->capacity * 2;
-            if (next_block->capacity > 1024) next_block->capacity = 1024;
+            if (next_block->capacity > 32768) next_block->capacity = 32768;
             next_block->count = 0;
             next_block->next = NULL;
             next_block->items = arena_alloc_array(s->scratch, JsonNode, next_block->capacity);
@@ -982,6 +1120,8 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
             node->value.trailing_comment = arena_alloc_array(main, char, clen + 1);
             strcpy(node->value.trailing_comment, s->inline_comment);
             s->inline_comment = NULL;
+        } else {
+            node->value.trailing_comment = NULL;
         }
 
         char c = *s->curr;
@@ -1008,18 +1148,26 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
 
                 if (s->curr < s->end && *s->curr == '}') {
                     advance(s, 1);
+                if (s->inline_comment || s->last_comment) {
                     obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
                     s->last_comment = NULL;
                     s->inline_comment = NULL;
+                } else {
+                    obj->post_comment = NULL;
+                }
                     break;
                 }
             }
         } 
         else if (c == '}') { 
             advance(s, 1); 
+        if (s->inline_comment || s->last_comment) {
             obj->post_comment = combine_comments(main, s->inline_comment, s->last_comment);
             s->last_comment = NULL;
             s->inline_comment = NULL;
+        } else {
+            obj->post_comment = NULL;
+        }
             break; 
         } 
         else { set_error(s, "Expected ',' or '}'"); return false; }
@@ -1047,70 +1195,74 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
     return true;
 }
 
-typedef bool (*parse_func)(Arena *, ParseState *, JsonValue *, int);
-
-static bool parse_string_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    (void)depth;
-    v->type = JSON_STRING;
-    return parse_string(main, s, &v->as.string);
-}
-static bool parse_array_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    v->type = JSON_ARRAY; return parse_array(main, s, v, depth);
-}
-static bool parse_object_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    v->type = JSON_OBJECT; return parse_object(main, s, v, depth);
-}
-static bool parse_number_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    (void)main; (void)depth;
-    v->type = JSON_NUMBER; return parse_number(s, &v->as.number);
-}
-static bool parse_true_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    (void)main; (void)depth;
-    if (s->end - s->curr >= 4 && s->curr[1] == 'r' && s->curr[2] == 'u' && s->curr[3] == 'e') {
-        v->type = JSON_BOOL; v->as.boolean = true; advance(s, 4); return true;
+static inline bool parse_true(ParseState *s, JsonValue *v) {
+    if (s->end - s->curr >= 4) {
+        uint32_t val;
+        memcpy(&val, s->curr, 4);
+        if (val == 0x65757274) { // "true"
+            v->type = JSON_BOOL; v->as.boolean = true; advance(s, 4); return true;
+        }
     }
     set_error(s, "Expected 'true'"); return false;
 }
-static bool parse_false_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    (void)main; (void)depth;
-    if (s->end - s->curr >= 5 && s->curr[1] == 'a' && s->curr[2] == 'l' && s->curr[3] == 's' && s->curr[4] == 'e') {
-        v->type = JSON_BOOL; v->as.boolean = false; advance(s, 5); return true;
+static inline bool parse_false(ParseState *s, JsonValue *v) {
+    if (s->end - s->curr >= 5) {
+        uint32_t val;
+        memcpy(&val, s->curr, 4);
+        if (val == 0x736c6166 && s->curr[4] == 'e') { // "fals" + 'e'
+            v->type = JSON_BOOL; v->as.boolean = false; advance(s, 5); return true;
+        }
     }
     set_error(s, "Expected 'false'"); return false;
 }
-static bool parse_null_dispatch(Arena *main, ParseState *s, JsonValue *v, int depth) {
-    (void)main; (void)depth;
-    if (s->end - s->curr >= 4 && s->curr[1] == 'u' && s->curr[2] == 'l' && s->curr[3] == 'l') {
-        v->type = JSON_NULL; advance(s, 4); return true;
+static inline bool parse_null(ParseState *s, JsonValue *v) {
+    if (s->end - s->curr >= 4) {
+        uint32_t val;
+        memcpy(&val, s->curr, 4);
+        if (val == 0x6c6c756e) { // "null"
+            v->type = JSON_NULL; advance(s, 4); return true;
+        }
     }
     set_error(s, "Expected 'null'"); return false;
 }
-
-static const parse_func dispatch_table[256] = {
-    ['"'] = parse_string_dispatch, ['['] = parse_array_dispatch, ['{'] = parse_object_dispatch,
-    ['-'] = parse_number_dispatch, ['0'] = parse_number_dispatch, ['1'] = parse_number_dispatch,
-    ['2'] = parse_number_dispatch, ['3'] = parse_number_dispatch, ['4'] = parse_number_dispatch,
-    ['5'] = parse_number_dispatch, ['6'] = parse_number_dispatch, ['7'] = parse_number_dispatch,
-    ['8'] = parse_number_dispatch, ['9'] = parse_number_dispatch, ['t'] = parse_true_dispatch,
-    ['f'] = parse_false_dispatch,  ['n'] = parse_null_dispatch,
-};
 
 static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int depth) {
     skip_whitespace(s);
     if (s->curr >= s->end) { set_error(s, "Unexpected end"); return false; }
     out_val->offset = s->curr - s->start;
 
-    out_val->pre_comment = combine_comments(main, s->inline_comment, s->last_comment);
-    s->last_comment = NULL;
-    s->inline_comment = NULL;
+    if (s->inline_comment || s->last_comment) {
+        out_val->pre_comment = combine_comments(main, s->inline_comment, s->last_comment);
+        s->last_comment = NULL;
+        s->inline_comment = NULL;
+    } else {
+        out_val->pre_comment = NULL;
+    }
     out_val->post_comment = NULL;
     out_val->trailing_comment = NULL;
 
     unsigned char c = (unsigned char)*s->curr;
-    parse_func func = dispatch_table[c];
-    if (func) return func(main, s, out_val, depth);
-    set_error(s, "Unexpected character '%c'", c);
-    return false;
+    switch (c) {
+        case '"': 
+            out_val->type = JSON_STRING;
+            return parse_string(main, s, &out_val->as.string);
+        case '[': 
+            out_val->type = JSON_ARRAY;
+            return parse_array(main, s, out_val, depth);
+        case '{': 
+            out_val->type = JSON_OBJECT;
+            return parse_object(main, s, out_val, depth);
+        case '-': case '0': case '1': case '2': case '3': case '4':
+        case '5': case '6': case '7': case '8': case '9':
+            out_val->type = JSON_NUMBER;
+            return parse_number(s, &out_val->as.number);
+        case 't': return parse_true(s, out_val);
+        case 'f': return parse_false(s, out_val);
+        case 'n': return parse_null(s, out_val);
+        default:
+            set_error(s, "Unexpected character '%c'", c);
+            return false;
+    }
 }
 
 JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len, int flags, JsonError *err) {
@@ -1130,7 +1282,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.inline_comment = NULL;
     
     // Dynamically scale the key cache based on payload size
-    if (len > 256) {
+    if (len > 4096) {
         uint32_t cap = 256;
         while (cap < len / 4 && cap < KEY_CACHE_CAPACITY) cap *= 2;
         s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * cap);
@@ -1148,9 +1300,11 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.inline_comment = NULL;
     skip_whitespace(&s);
     
-    char *trail = combine_comments(main, s.inline_comment, s.last_comment);
-    if (trail) {
-        root->trailing_comment = trail;
+    if (s.inline_comment || s.last_comment) {
+        char *trail = combine_comments(main, s.inline_comment, s.last_comment);
+        if (trail) {
+            root->trailing_comment = trail;
+        }
     }
 
     if (s.curr != s.end) {
@@ -1235,28 +1389,34 @@ static void sb_putc(StrBuilder *sb, char c) {
 
 static void w_escaped_string(StrBuilder *sb, const char *s) {
     sb_putc(sb, '"');
-    const char *start = s;
     while (*s) {
+        const char *p = s;
+        while (*p) {
+            unsigned char c = (unsigned char)*p;
+            if (c == '"' || c == '\\' || c < 0x20) break;
+            p++;
+        }
+        if (p > s) {
+            sb_append(sb, s, p - s);
+            s = p;
+        }
+        if (*s == '\0') break;
+
         unsigned char c = (unsigned char)*s;
-        if (c == '"' || c == '\\' || c < 0x20) {
-            if (s > start) sb_append(sb, start, s - start);
-            if (c == '"') sb_append(sb, "\\\"", 2);
-            else if (c == '\\') sb_append(sb, "\\\\", 2);
-            else if (c == '\b') sb_append(sb, "\\b", 2);
-            else if (c == '\f') sb_append(sb, "\\f", 2);
-            else if (c == '\n') sb_append(sb, "\\n", 2);
-            else if (c == '\r') sb_append(sb, "\\r", 2);
-            else if (c == '\t') sb_append(sb, "\\t", 2);
-            else {
-                char hex[7];
-                sprintf(hex, "\\u00%02X", c);
-                sb_append(sb, hex, 6);
-            }
-            start = s + 1;
+        if (c == '"') sb_append(sb, "\\\"", 2);
+        else if (c == '\\') sb_append(sb, "\\\\", 2);
+        else if (c == '\b') sb_append(sb, "\\b", 2);
+        else if (c == '\f') sb_append(sb, "\\f", 2);
+        else if (c == '\n') sb_append(sb, "\\n", 2);
+        else if (c == '\r') sb_append(sb, "\\r", 2);
+        else if (c == '\t') sb_append(sb, "\\t", 2);
+        else {
+            char hex[7];
+            sprintf(hex, "\\u00%02X", c);
+            sb_append(sb, hex, 6);
         }
         s++;
     }
-    if (s > start) sb_append(sb, start, s - start);
     sb_putc(sb, '"');
 }
 
@@ -1313,7 +1473,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
             if (!isfinite(v->as.number)) { sb_append(sb, "null", 4); } 
             else {
                 double n = v->as.number;
-                if (n == (int64_t)n) { 
+                if (n >= -9007199254740991.0 && n <= 9007199254740991.0 && n == (int64_t)n) { 
                     char num_buf[32];
                     int64_t val = (int64_t)n;
                     char *p = num_buf + 31;
@@ -1327,7 +1487,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     sb_append(sb, p, (num_buf + 31) - p);
                 } else {
                     char num_buf[64];
-                    int len = snprintf(num_buf, sizeof(num_buf), "%.17g", n);
+                    int len = snprintf(num_buf, sizeof(num_buf), "%.15g", n); // 15 digits is standard JSON precision (speeds up parsing slightly)
                     sb_append(sb, num_buf, len);
                 }
             }
