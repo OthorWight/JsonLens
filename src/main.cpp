@@ -182,6 +182,7 @@ int main(int /*argc*/, char** /*argv*/) {
     std::atomic<bool> doc_loading{false};
     std::atomic<bool> doc_saving{false};
     std::atomic<bool> doc_formatting{false};
+    std::atomic<bool> doc_formatting_done{false};
     std::atomic<bool> doc_graph_building{false};
     std::atomic<LargeTextFile*> doc_ready{nullptr};
     std::thread doc_thread;
@@ -439,7 +440,7 @@ int main(int /*argc*/, char** /*argv*/) {
             bool keep_comments = settings.allow_comments;
             bool need_ast_rebuild = text_dirty;
             text_dirty = false;
-            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, keep_comments, need_ast_rebuild, &doc_formatting, &search_dirty]() {
+            doc_thread = std::thread([doc, pretty, use_tabs, indent_size, keep_comments, need_ast_rebuild, &doc_formatting, &doc_formatting_done, &search_dirty]() {
                 if (doc->root_json == nullptr || need_ast_rebuild) {
                     doc->RebuildTreeFromText(keep_comments);
                 }
@@ -464,6 +465,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     }
                 }
                 doc_formatting = false;
+                doc_formatting_done = true;
                 search_dirty = true;
             });
         }
@@ -500,24 +502,23 @@ int main(int /*argc*/, char** /*argv*/) {
             doc_formatting = true; // Use doc_formatting to indicate background work
             if (doc_thread.joinable()) doc_thread.join();
             bool allow_comments = settings.allow_comments;
-            doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() {
+            doc_thread = std::thread([doc, allow_comments, &doc_formatting, &doc_formatting_done, &search_dirty]() {
                 doc->last_err = JsonError{}; // Clear previous error before re-parsing
                 doc->RebuildTreeFromText(allow_comments);
                 doc_formatting = false;
+                doc_formatting_done = true;
                 search_dirty = true; // Re-evaluate search results after potential text changes
             });
         }
     };
 
     bool done = false;
-    bool was_formatting = false;
     while (!done) {
         bool zoom_changed = false;
-        bool current_formatting = doc_formatting.load();
-        if (was_formatting && !current_formatting) {
+        
+        if (doc_formatting_done.exchange(false)) {
             if (inline_edit_line >= 0) inline_edit_needs_refresh = true;
         }
-        was_formatting = current_formatting;
 
         bool focus_search = false;
         bool focus_replace = false;
@@ -1003,9 +1004,10 @@ int main(int /*argc*/, char** /*argv*/) {
                 doc_formatting = true;
                 bool allow_comments = settings.allow_comments;
                 if (doc_thread.joinable()) doc_thread.join();
-                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { 
+                doc_thread = std::thread([doc, allow_comments, &doc_formatting, &doc_formatting_done, &search_dirty]() { 
                     doc->RebuildTreeFromText(allow_comments); 
                     doc_formatting = false; 
+                    doc_formatting_done = true;
                     search_dirty = true; 
                 });
             }
@@ -1043,9 +1045,10 @@ int main(int /*argc*/, char** /*argv*/) {
                         int indent_size = settings.indent_size;
                         bool keep_comments = settings.allow_comments;
                         if (doc_thread.joinable()) doc_thread.join();
-                        doc_thread = std::thread([doc, use_tabs, indent_size, keep_comments, &doc_formatting, &search_dirty]() {
+                        doc_thread = std::thread([doc, use_tabs, indent_size, keep_comments, &doc_formatting, &doc_formatting_done, &search_dirty]() {
                             doc->RebuildTextFromTree(use_tabs, indent_size, keep_comments);
                             doc_formatting = false;
+                            doc_formatting_done = true;
                             search_dirty = true;
                         });
                     }
@@ -1714,7 +1717,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     doc_formatting = true;
                     bool allow_comments = settings.allow_comments;
                     if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &doc_formatting_done, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; doc_formatting_done = true; search_dirty = true; });
                 }
 
                 ImGui::AlignTextToFramePadding();
@@ -1823,7 +1826,7 @@ int main(int /*argc*/, char** /*argv*/) {
                     doc_formatting = true;
                     bool allow_comments = settings.allow_comments;
                     if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; search_dirty = true; });
+                    doc_thread = std::thread([doc, allow_comments, &doc_formatting, &doc_formatting_done, &search_dirty]() { doc->RebuildTreeFromText(allow_comments); doc_formatting = false; doc_formatting_done = true; search_dirty = true; });
                 }
 
                 ImGui::AlignTextToFramePadding();

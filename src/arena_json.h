@@ -292,7 +292,6 @@ void arena_temp_end(ArenaTemp temp) {
 /* --- JSON Implementation --- */
 
 #define MAX_JSON_DEPTH 1000
-#define BLOCK_CAPACITY 128
 
 typedef struct KeyCacheEntry {
     const char *source_str;
@@ -310,13 +309,15 @@ typedef struct {
     Arena *scratch; 
     int flags;
     KeyCacheEntry *key_cache;
+    uint32_t key_cache_mask;
     char *last_comment;
     char *inline_comment;
 } ParseState;
 
 typedef struct NodeBlock NodeBlock;
 struct NodeBlock {
-    JsonNode items[BLOCK_CAPACITY];
+    JsonNode *items;
+    size_t capacity;
     size_t count;
     NodeBlock *next;
 };
@@ -342,6 +343,36 @@ static void advance(ParseState *s, int n) { s->curr += n; }
 static const unsigned char ws_lut[256] = { [' '] = 1, ['\n'] = 1, ['\r'] = 1, ['\t'] = 1 };
 
 static void skip_whitespace(ParseState *s) {
+    const char *p = s->curr;
+    const char *end = s->end;
+
+    if (!(s->flags & JSON_PARSE_ALLOW_COMMENTS)) {
+        if (p < end && !ws_lut[(unsigned char)*p]) return; // Fast reject for minified JSON
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
+        const __m128i v_sp  = _mm_set1_epi8(' ');
+        const __m128i v_lf  = _mm_set1_epi8('\n');
+        const __m128i v_cr  = _mm_set1_epi8('\r');
+        const __m128i v_tab = _mm_set1_epi8('\t');
+        while (p + 16 <= end) {
+            __m128i data = _mm_loadu_si128((const __m128i *)p);
+            __m128i is_ws = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(data, v_sp), _mm_cmpeq_epi8(data, v_lf)), 
+                                         _mm_or_si128(_mm_cmpeq_epi8(data, v_cr), _mm_cmpeq_epi8(data, v_tab)));
+            uint32_t mask = (uint32_t)_mm_movemask_epi8(is_ws);
+            if (mask != 0xFFFF) {
+                p += __builtin_ctz(~mask);
+                s->curr = p;
+                return;
+            }
+            p += 16;
+        }
+#endif
+        while (p < end && ws_lut[(unsigned char)*p]) p++;
+        s->curr = p;
+        return;
+    }
+
+    if (p < end && !ws_lut[(unsigned char)*p] && *p != '/') return; // Fast reject for comments
+
     char *comments = NULL;
     size_t comm_cap = 0, comm_len = 0;
     
@@ -350,20 +381,14 @@ static void skip_whitespace(ParseState *s) {
     bool seen_newline = false;
 
     while (1) {
-        const char *p = s->curr;
-        const char *end = s->end;
+        p = s->curr;
         const char *p_start = p;
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
-        static const char space_chars[16] __attribute__((aligned(16))) = { ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ' };
-        static const char lf_chars[16]    __attribute__((aligned(16))) = { '\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n','\n' };
-        static const char cr_chars[16]    __attribute__((aligned(16))) = { '\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r','\r' };
-        static const char tab_chars[16]   __attribute__((aligned(16))) = { '\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t','\t' };
-
-        const __m128i v_sp  = _mm_load_si128((const __m128i*)space_chars);
-        const __m128i v_lf  = _mm_load_si128((const __m128i*)lf_chars);
-        const __m128i v_cr  = _mm_load_si128((const __m128i*)cr_chars);
-        const __m128i v_tab = _mm_load_si128((const __m128i*)tab_chars);
+        const __m128i v_sp  = _mm_set1_epi8(' ');
+        const __m128i v_lf  = _mm_set1_epi8('\n');
+        const __m128i v_cr  = _mm_set1_epi8('\r');
+        const __m128i v_tab = _mm_set1_epi8('\t');
 
         while (p + 16 <= end) {
             __m128i data = _mm_loadu_si128((const __m128i *)p);
@@ -387,24 +412,23 @@ static void skip_whitespace(ParseState *s) {
         
         s->curr = p;
 
-        if (s->flags & JSON_PARSE_ALLOW_COMMENTS) {
-            if (p + 1 < end && p[0] == '/') {
-                const char *comm_start = p;
-                bool was_newline = seen_newline;
-                
-                if (p[1] == '/') {
-                    p += 2;
-                    while (p < end && *p != '\n') p++;
-                } else if (p[1] == '*') {
-                    p += 2;
-                    while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) {
-                        if (*p == '\n') seen_newline = true;
-                        p++;
-                    }
-                    if (p + 1 < end) p += 2;
-                } else {
-                    break;
+        if (p + 1 < end && p[0] == '/') {
+            const char *comm_start = p;
+            bool was_newline = seen_newline;
+            
+            if (p[1] == '/') {
+                p += 2;
+                while (p < end && *p != '\n') p++;
+            } else if (p[1] == '*') {
+                p += 2;
+                while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) {
+                    if (*p == '\n') seen_newline = true;
+                    p++;
                 }
+                if (p + 1 < end) p += 2;
+            } else {
+                break;
+            }
 
                 size_t len = p - comm_start;
                 
@@ -450,7 +474,6 @@ static void skip_whitespace(ParseState *s) {
                 
                 s->curr = p;
                 continue;
-            }
         }
         break;
     }
@@ -576,7 +599,7 @@ static bool parse_string(Arena *a, ParseState *s, char **out_str) {
             hash ^= (uint8_t)start_content[i];
             hash *= 16777619;
         }
-        uint32_t slot = hash & (KEY_CACHE_CAPACITY - 1);
+        uint32_t slot = hash & s->key_cache_mask;
         entry = &s->key_cache[slot];
         
         if (entry->cached_str && entry->source_len == raw_len && memcmp(entry->source_str, start_content, raw_len) == 0) {
@@ -773,20 +796,26 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
 
     ArenaTemp temp_mem = arena_temp_begin(s->scratch);
     
-    NodeBlock *head = arena_alloc_struct(s->scratch, NodeBlock);
-    if (!head) return false;
-    head->count = 0;
-    head->next = NULL;
+    JsonNode first_items[8];
+    NodeBlock head;
+    head.capacity = 8; // Start small for micro-payloads directly on the stack
+    head.count = 0;
+    head.next = NULL;
+    head.items = first_items;
     
-    NodeBlock *curr_block = head;
+    NodeBlock *curr_block = &head;
     size_t total_count = 0;
     
     while (1) {
-        if (curr_block->count == BLOCK_CAPACITY) {
+        if (curr_block->count == curr_block->capacity) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
             if (!next_block) return false;
+            next_block->capacity = curr_block->capacity * 2;
+            if (next_block->capacity > 1024) next_block->capacity = 1024;
             next_block->count = 0;
             next_block->next = NULL;
+            next_block->items = arena_alloc_array(s->scratch, JsonNode, next_block->capacity);
+            if (!next_block->items) return false;
             curr_block->next = next_block;
             curr_block = next_block;
         }
@@ -854,15 +883,21 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
     }
 
     arr->as.list.count = total_count;
-    arr->as.list.items = arena_alloc_array(main, JsonNode, total_count);
-    if (!arr->as.list.items) return false;
-    
-    size_t write_idx = 0;
-    const NodeBlock *b = head;
-    while (b) {
-        memcpy(&arr->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
-        write_idx += b->count;
-        b = b->next;
+    if (total_count > 0) {
+        arr->as.list.items = arena_alloc_array(main, JsonNode, total_count);
+        if (!arr->as.list.items) return false;
+        
+        size_t write_idx = 0;
+        const NodeBlock *b = &head;
+        while (b) {
+            if (b->count > 0) {
+                memcpy(&arr->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
+                write_idx += b->count;
+            }
+            b = b->next;
+        }
+    } else {
+        arr->as.list.items = NULL;
     }
     
     arena_temp_end(temp_mem);
@@ -889,12 +924,14 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
 
     ArenaTemp temp_mem = arena_temp_begin(s->scratch);
     
-    NodeBlock *head = arena_alloc_struct(s->scratch, NodeBlock);
-    if (!head) return false;
-    head->count = 0;
-    head->next = NULL;
+    JsonNode first_items[8];
+    NodeBlock head;
+    head.capacity = 8; // Start small for micro-payloads directly on the stack
+    head.count = 0;
+    head.next = NULL;
+    head.items = first_items;
     
-    NodeBlock *curr_block = head;
+    NodeBlock *curr_block = &head;
     size_t total_count = 0;
 
     while (1) {
@@ -906,11 +943,15 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         s->last_comment = NULL;
         s->inline_comment = NULL;
 
-        if (curr_block->count == BLOCK_CAPACITY) {
+        if (curr_block->count == curr_block->capacity) {
             NodeBlock *next_block = arena_alloc_struct(s->scratch, NodeBlock);
             if (!next_block) return false;
+            next_block->capacity = curr_block->capacity * 2;
+            if (next_block->capacity > 1024) next_block->capacity = 1024;
             next_block->count = 0;
             next_block->next = NULL;
+            next_block->items = arena_alloc_array(s->scratch, JsonNode, next_block->capacity);
+            if (!next_block->items) return false;
             curr_block->next = next_block;
             curr_block = next_block;
         }
@@ -985,15 +1026,21 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
     }
 
     obj->as.list.count = total_count;
-    obj->as.list.items = arena_alloc_array(main, JsonNode, total_count);
-    if (!obj->as.list.items) return false;
-    
-    size_t write_idx = 0;
-    const NodeBlock *b = head;
-    while (b) {
-        memcpy(&obj->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
-        write_idx += b->count;
-        b = b->next;
+    if (total_count > 0) {
+        obj->as.list.items = arena_alloc_array(main, JsonNode, total_count);
+        if (!obj->as.list.items) return false;
+        
+        size_t write_idx = 0;
+        const NodeBlock *b = &head;
+        while (b) {
+            if (b->count > 0) {
+                memcpy(&obj->as.list.items[write_idx], b->items, b->count * sizeof(JsonNode));
+                write_idx += b->count;
+            }
+            b = b->next;
+        }
+    } else {
+        obj->as.list.items = NULL;
     }
     
     arena_temp_end(temp_mem);
@@ -1068,7 +1115,12 @@ static bool parse_element(Arena *main, ParseState *s, JsonValue *out_val, int de
 
 JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len, int flags, JsonError *err) {
     if (!main || !scratch || !input || len == 0) return NULL;  
-    if (err) memset(err, 0, sizeof(JsonError));
+    if (err) {
+        err->msg[0] = '\0';
+        err->line = 0;
+        err->col = 0;
+        err->offset = 0;
+    }
 
     ParseState s = {0};
     s.start = input; s.curr = input; s.end = input + len;
@@ -1076,7 +1128,16 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     s.flags = flags;
     s.last_comment = NULL;
     s.inline_comment = NULL;
-    s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * KEY_CACHE_CAPACITY);
+    
+    // Dynamically scale the key cache based on payload size
+    if (len > 256) {
+        uint32_t cap = 256;
+        while (cap < len / 4 && cap < KEY_CACHE_CAPACITY) cap *= 2;
+        s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * cap);
+        s.key_cache_mask = cap - 1;
+    } else {
+        s.key_cache = NULL;
+    }
 
     JsonValue *root = arena_alloc_struct(main, JsonValue);
     if (!root) return NULL;
@@ -1199,17 +1260,46 @@ static void w_escaped_string(StrBuilder *sb, const char *s) {
     sb_putc(sb, '"');
 }
 
+static bool comment_requires_newline(const char *comment) {
+    if (!comment) return false;
+    bool in_line = false;
+    bool in_block = false;
+    for (const char *p = comment; *p; p++) {
+        if (!in_line && !in_block) {
+            if (p[0] == '/' && p[1] == '/') {
+                in_line = true;
+                p++;
+            } else if (p[0] == '/' && p[1] == '*') {
+                in_block = true;
+                p++;
+            }
+        } else if (in_line) {
+            if (*p == '\n') in_line = false;
+        } else if (in_block) {
+            if (p[0] == '*' && p[1] == '/') {
+                in_block = false;
+                p++;
+            }
+        }
+    }
+    return in_line;
+}
+
 static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pretty, bool use_tabs, int indent_step, bool keep_comments) {
     if (!v) return;
 
     if (keep_comments && v->pre_comment) {
         sb_append(sb, v->pre_comment, strlen(v->pre_comment));
-        if (pretty) sb_putc(sb, '\n');
-        if (pretty && depth > 0) {
-            for (int j = 0; j < depth; j++) {
-                if (use_tabs) sb_putc(sb, '\t');
-                else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+        if (pretty) {
+            sb_putc(sb, '\n');
+            if (depth > 0) {
+                for (int j = 0; j < depth; j++) {
+                    if (use_tabs) sb_putc(sb, '\t');
+                    else for (int k = 0; k < indent_step; k++) sb_putc(sb, ' ');
+                }
             }
+        } else if (comment_requires_newline(v->pre_comment)) {
+            sb_putc(sb, '\n');
         }
     }
 
@@ -1268,6 +1358,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     if (keep_comments && child->trailing_comment) {
                         if (pretty) sb_putc(sb, ' ');
                         sb_append(sb, child->trailing_comment, strlen(child->trailing_comment));
+                        if (!pretty && comment_requires_newline(child->trailing_comment)) {
+                            sb_putc(sb, '\n');
+                        }
                     }
                 }
                 if (keep_comments && v->post_comment) {
@@ -1279,6 +1372,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     sb_append(sb, v->post_comment, strlen(v->post_comment));
+                    if (!pretty && comment_requires_newline(v->post_comment)) {
+                        sb_putc(sb, '\n');
+                    }
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
@@ -1307,6 +1403,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                             }
                         }
                         sb_append(sb, node->pre_comment, strlen(node->pre_comment));
+                        if (!pretty && comment_requires_newline(node->pre_comment)) {
+                            sb_putc(sb, '\n');
+                        }
                     }
                     
                     if (pretty) {
@@ -1329,6 +1428,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                     if (keep_comments && child->trailing_comment) {
                         if (pretty) sb_putc(sb, ' ');
                         sb_append(sb, child->trailing_comment, strlen(child->trailing_comment));
+                        if (!pretty && comment_requires_newline(child->trailing_comment)) {
+                            sb_putc(sb, '\n');
+                        }
                     }
                 }
                 if (keep_comments && v->post_comment) {
@@ -1340,6 +1442,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
                         }
                     }
                     sb_append(sb, v->post_comment, strlen(v->post_comment));
+                    if (!pretty && comment_requires_newline(v->post_comment)) {
+                        sb_putc(sb, '\n');
+                    }
                 }
                 if (pretty) {
                     sb_putc(sb, '\n');
@@ -1357,6 +1462,9 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
     if (keep_comments && depth == 0 && v->trailing_comment) {
         if (pretty) sb_putc(sb, ' ');
         sb_append(sb, v->trailing_comment, strlen(v->trailing_comment));
+        if (!pretty && comment_requires_newline(v->trailing_comment)) {
+            sb_putc(sb, '\n');
+        }
     }
 }
 

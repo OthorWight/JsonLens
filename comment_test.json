@@ -3,17 +3,14 @@
 {
   // Pre-Key Comment
   "string_test": "hello", // Trailing Value Comment
-
   /* Pre-Key Block Comment */
-  "number_test": 123.45 /* Inline Value Comment */,
-
+  "number_test": 123.45, /* Inline Value Comment */
   // Pre-Object Key Comment
   "object_test": {
     // Pre-Inner Key Comment
     "inner": true // Trailing Inner Value Comment
     // Post-Elements Object Comment
   }, // Trailing Object Comment
-
   // Pre-Array Key Comment
   "array_test": [
     // Pre-Element Comment
@@ -22,7 +19,6 @@
     false
     // Post-Elements Array Comment
   ] // Trailing Array Comment
-
   // Post-Elements Root Object Comment
 } // Trailing Root Comment
 /* Post-Root Block Comment */
