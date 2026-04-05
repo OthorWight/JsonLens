@@ -156,6 +156,17 @@ char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int ind
 double      json_get_number(JsonValue *obj, const char *key, double fallback);
 const char* json_get_string(JsonValue *obj, const char *key, const char *fallback);
 bool        json_get_bool(JsonValue *obj, const char *key, bool fallback);
+JsonValue * json_get_case(JsonValue *obj, const char *key);
+
+void        json_remove_from_object(JsonValue *obj, const char *key);
+void        json_replace_in_object(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
+JsonValue * json_detach_from_object(Arena *a, JsonValue *obj, const char *key);
+JsonValue * json_clone(Arena *a, const JsonValue *val);
+
+#define json_object_foreach(entry, obj) \
+    for (size_t _idx = 0; (obj) && ((obj)->type == JSON_OBJECT) && _idx < (obj)->as.list.count && ((entry) = &(obj)->as.list.items[_idx], 1); ++_idx)
+#define json_array_foreach(entry, arr) \
+    for (size_t _idx = 0; (arr) && ((arr)->type == JSON_ARRAY) && _idx < (arr)->as.list.count && ((entry) = &(arr)->as.list.items[_idx], 1); ++_idx)
 
 /* --- Builder API --- */
 JsonValue *json_create_null(Arena *a);
@@ -172,6 +183,7 @@ void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val);
 
 void json_append(Arena *a, JsonValue *arr, const JsonValue *val);
 void json_append_string(Arena *a, JsonValue *arr, const char *val);
+void json_append_number(Arena *a, JsonValue *arr, double val);
 
 #ifdef __cplusplus
 }
@@ -369,6 +381,7 @@ static inline bool parse_number_fast_path(ParseState *s, double *out_dbl) {
     if (p >= s->end) return false;
 
     uint64_t i = 0;
+    const char *start_digits = p;
     if (*p == '0') {
         p++;
         if (p < s->end && *p >= '0' && *p <= '9') return false;
@@ -382,6 +395,7 @@ static inline bool parse_number_fast_path(ParseState *s, double *out_dbl) {
             i = i * 10 + (*p - '0');
             p++;
         }
+        if (p - start_digits > 15) return false;
     } else {
         return false;
     }
@@ -402,6 +416,7 @@ static inline bool parse_number_fast_path(ParseState *s, double *out_dbl) {
             p++;
         }
         if (p == frac_start) return false;
+        if (p - start_digits > 16) return false;
         exponent -= (p - frac_start);
     }
 
@@ -413,7 +428,9 @@ static inline bool parse_number_fast_path(ParseState *s, double *out_dbl) {
         uint64_t exp_val = 0;
         const char *exp_start = p;
         while (p < s->end && *p >= '0' && *p <= '9') {
-            exp_val = exp_val * 10 + (*p - '0');
+            if (exp_val < 1000000) {
+                exp_val = exp_val * 10 + (*p - '0');
+            }
             p++;
         }
         if (p == exp_start) return false;
@@ -822,7 +839,7 @@ static bool parse_number(ParseState *s, double *out_num) {
 
     const char *p = s->curr;
     int64_t mantissa = 0;
-    int exponent = 0;
+    int64_t exponent = 0;
     int sign = 1;
 
     if (p < s->end && *p == '-') { sign = -1; p++; }
@@ -860,10 +877,12 @@ static bool parse_number(ParseState *s, double *out_num) {
             if (*p == '-') exp_sign = -1;
             p++;
         }
-        int32_t e_val = 0;
+        int64_t e_val = 0;
         const char *exp_start = p;
         while (p < s->end && (*p >= '0' && *p <= '9')) {
-            e_val = e_val * 10 + (*p - '0');
+            if (e_val < 1000000) {
+                e_val = e_val * 10 + (*p - '0');
+            }
             p++;
         }
         if (p == exp_start) { set_error(s, "Expected digit in exponent"); return false; }
@@ -875,16 +894,7 @@ static bool parse_number(ParseState *s, double *out_num) {
         if (exponent < 0 && -exponent <= 22) { val /= power_of_ten[-exponent]; } 
         else if (exponent > 0 && exponent <= 22) { val *= power_of_ten[exponent]; } 
         else { 
-            double p = 1.0;
-            double base = 10.0;
-            int e = exponent < 0 ? -exponent : exponent;
-            while (e > 0) {
-                if (e & 1) p *= base;
-                base *= base;
-                e >>= 1;
-            }
-            if (exponent < 0) val /= p;
-            else val *= p;
+            val *= pow(10.0, exponent);
         }
     }
 
@@ -915,7 +925,9 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
         return true;
     }
 
-    ArenaTemp temp_mem = arena_temp_begin(s->scratch);
+    bool same_arena = (main == s->scratch);
+    ArenaTemp temp_mem = {0};
+    if (!same_arena) temp_mem = arena_temp_begin(s->scratch);
     
     JsonNode first_items[16];
     NodeBlock head;
@@ -1031,7 +1043,7 @@ static bool parse_array(Arena *main, ParseState *s, JsonValue *arr, int depth) {
         arr->as.list.items = NULL;
     }
     
-    arena_temp_end(temp_mem);
+    if (!same_arena) arena_temp_end(temp_mem);
     return true;
 }
 
@@ -1057,7 +1069,9 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         return true;
     }
 
-    ArenaTemp temp_mem = arena_temp_begin(s->scratch);
+    bool same_arena = (main == s->scratch);
+    ArenaTemp temp_mem = {0};
+    if (!same_arena) temp_mem = arena_temp_begin(s->scratch);
     
     JsonNode first_items[16];
     NodeBlock head;
@@ -1191,7 +1205,7 @@ static bool parse_object(Arena *main, ParseState *s, JsonValue *obj, int depth) 
         obj->as.list.items = NULL;
     }
     
-    arena_temp_end(temp_mem);
+    if (!same_arena) arena_temp_end(temp_mem);
     return true;
 }
 
@@ -1339,6 +1353,112 @@ const char* json_get_string(JsonValue *obj, const char *key, const char *fallbac
 bool json_get_bool(JsonValue *obj, const char *key, bool fallback) {
     JsonValue *v = json_get(obj, key);
     return (v && v->type == JSON_BOOL) ? v->as.boolean : fallback;
+}
+
+static bool arena_json_strcasecmp(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+JsonValue *json_get_case(JsonValue *obj, const char *key) {
+    if (!obj || !key || obj->type != JSON_OBJECT) return NULL;
+    for (size_t i = 0; i < obj->as.list.count; i++) {
+        if (arena_json_strcasecmp(obj->as.list.items[i].key, key)) return &obj->as.list.items[i].value;
+    }
+    return NULL;
+}
+
+void json_remove_from_object(JsonValue *obj, const char *key) {
+    if (!obj || !key || obj->type != JSON_OBJECT) return;
+    for (size_t i = 0; i < obj->as.list.count; i++) {
+        if (strcmp(obj->as.list.items[i].key, key) == 0) {
+            if (i < obj->as.list.count - 1) {
+                memmove(&obj->as.list.items[i], &obj->as.list.items[i + 1], 
+                        (obj->as.list.count - i - 1) * sizeof(JsonNode));
+            }
+            obj->as.list.count--;
+            return;
+        }
+    }
+}
+
+void json_replace_in_object(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
+    if (!obj || !key || !val || obj->type != JSON_OBJECT) return;
+    for (size_t i = 0; i < obj->as.list.count; i++) {
+        if (strcmp(obj->as.list.items[i].key, key) == 0) {
+            obj->as.list.items[i].value = *val;
+            return;
+        }
+    }
+    json_add(a, obj, key, val);
+}
+
+JsonValue *json_detach_from_object(Arena *a, JsonValue *obj, const char *key) {
+    if (!obj || !key || obj->type != JSON_OBJECT) return NULL;
+    for (size_t i = 0; i < obj->as.list.count; i++) {
+        if (strcmp(obj->as.list.items[i].key, key) == 0) {
+            JsonValue *detached = arena_alloc_struct(a, JsonValue);
+            if (!detached) return NULL;
+            *detached = obj->as.list.items[i].value;
+            
+            if (i < obj->as.list.count - 1) {
+                memmove(&obj->as.list.items[i], &obj->as.list.items[i + 1], 
+                        (obj->as.list.count - i - 1) * sizeof(JsonNode));
+            }
+            obj->as.list.count--;
+            return detached;
+        }
+    }
+    return NULL;
+}
+
+JsonValue *json_clone(Arena *a, const JsonValue *v) {
+    if (!a || !v) return NULL;
+    JsonValue *copy = arena_alloc_struct(a, JsonValue);
+    if (!copy) return NULL;
+    *copy = *v;
+    
+    if (v->pre_comment) {
+        size_t l = strlen(v->pre_comment);
+        copy->pre_comment = arena_alloc_array(a, char, l + 1);
+        if (copy->pre_comment) strcpy(copy->pre_comment, v->pre_comment);
+    }
+    if (v->post_comment) {
+        size_t l = strlen(v->post_comment);
+        copy->post_comment = arena_alloc_array(a, char, l + 1);
+        if (copy->post_comment) strcpy(copy->post_comment, v->post_comment);
+    }
+    if (v->trailing_comment) {
+        size_t l = strlen(v->trailing_comment);
+        copy->trailing_comment = arena_alloc_array(a, char, l + 1);
+        if (copy->trailing_comment) strcpy(copy->trailing_comment, v->trailing_comment);
+    }
+    
+    if (v->type == JSON_STRING && v->as.string) {
+        size_t l = strlen(v->as.string);
+        copy->as.string = arena_alloc_array(a, char, l + 1);
+        if (copy->as.string) strcpy(copy->as.string, v->as.string);
+    } else if (v->type == JSON_ARRAY || v->type == JSON_OBJECT) {
+        if (v->as.list.count > 0 && v->as.list.items) {
+            copy->as.list.items = arena_alloc_array(a, JsonNode, v->as.list.count);
+            if (!copy->as.list.items) return copy;
+            for (size_t i = 0; i < v->as.list.count; i++) {
+                JsonNode *dn = &copy->as.list.items[i];
+                JsonNode *sn = &v->as.list.items[i];
+                dn->key = sn->key ? strcpy(arena_alloc_array(a, char, strlen(sn->key) + 1), sn->key) : NULL;
+                dn->pre_comment = sn->pre_comment ? strcpy(arena_alloc_array(a, char, strlen(sn->pre_comment) + 1), sn->pre_comment) : NULL;
+                JsonValue *cv = json_clone(a, &sn->value);
+                if (cv) dn->value = *cv;
+                else memset(&dn->value, 0, sizeof(JsonValue));
+            }
+        }
+    }
+    return copy;
 }
 
 /* --- Serialization Builders --- */
@@ -1730,6 +1850,13 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
         if (str_val.as.string) memcpy(str_val.as.string, val, len + 1);
         json_list_append(a, arr, NULL, &str_val);
     }
+}
+
+void json_append_number(Arena *a, JsonValue *arr, double val) {
+    JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
+    num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
+    num_val.trailing_comment = NULL;
+    json_list_append(a, arr, NULL, &num_val);
 }
 
 #endif /* ARENA_JSON_IMPLEMENTATION */

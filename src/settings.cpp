@@ -39,11 +39,11 @@ void AppSettings::Load() {
     if (root && root->type == JSON_OBJECT) {
         zoom = (float)json_get_number(root, "zoom", 1.0);
         JsonValue* recents = json_get(root, "recent_files");
-        if (recents && recents->type == JSON_ARRAY) {
-            for (size_t i = 0; i < recents->as.list.count; i++) {
-                if (recents->as.list.items[i].value.type == JSON_STRING) {
-                    recent_files.push_back(recents->as.list.items[i].value.as.string);
-                }
+        
+        JsonNode* entry;
+        json_array_foreach(entry, recents) {
+            if (entry->value.type == JSON_STRING && entry->value.as.string) {
+                recent_files.push_back(entry->value.as.string);
             }
         }
         const char* folder = json_get_string(root, "last_folder", nullptr);

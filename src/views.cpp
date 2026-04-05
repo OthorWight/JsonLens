@@ -362,10 +362,10 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             ImGui::SetClipboardText(my_path.c_str());
         }
         if (ImGui::MenuItem("Copy Value")) {
-            Arena temp; arena_init(&temp);
-            const char* str = json_to_string(&temp, val, true, false, 4, false);
+            ArenaTemp temp = arena_temp_begin(&doc->scratch_arena);
+            const char* str = json_to_string(&doc->scratch_arena, val, true, false, 4, false);
             if (str) ImGui::SetClipboardText(str);
-            arena_free(&temp);
+            arena_temp_end(temp);
         }
 
         if (node_index >= 0) {

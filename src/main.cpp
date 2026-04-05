@@ -819,6 +819,11 @@ int main(int /*argc*/, char** /*argv*/) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                     if (ImGui::IsMouseClicked(0)) {
                         JumpToLine(doc->last_err.line - 1);
+                        
+                        // Select the character causing the error and place the cursor exactly there
+                        doc->select_start = doc->last_err.offset;
+                        doc->select_end = doc->last_err.offset < doc->size ? doc->last_err.offset + 1 : doc->last_err.offset;
+                        SwitchToLineEdit(doc->last_err.line - 1, doc->last_err.col - 1);
                     }
                 }
                 ImGui::SameLine();

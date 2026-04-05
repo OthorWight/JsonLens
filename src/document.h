@@ -44,14 +44,19 @@ inline void CalculateJsonStats(JsonValue* val, JsonTreeStats& stats, size_t curr
     stats.total_nodes++;
     if (current_depth > stats.max_depth) stats.max_depth = current_depth;
     
+    JsonNode* entry;
     switch (val->type) {
         case JSON_OBJECT:
             stats.objects++;
-            for (size_t i = 0; i < val->as.list.count; i++) CalculateJsonStats(&val->as.list.items[i].value, stats, current_depth + 1);
+            json_object_foreach(entry, val) {
+                CalculateJsonStats(&entry->value, stats, current_depth + 1);
+            }
             break;
         case JSON_ARRAY:
             stats.arrays++;
-            for (size_t i = 0; i < val->as.list.count; i++) CalculateJsonStats(&val->as.list.items[i].value, stats, current_depth + 1);
+            json_array_foreach(entry, val) {
+                CalculateJsonStats(&entry->value, stats, current_depth + 1);
+            }
             break;
         case JSON_STRING: stats.strings++; break;
         case JSON_NUMBER: stats.numbers++; break;
@@ -91,7 +96,7 @@ inline void JsonInsertAtIndex(Arena* a, JsonValue* parent, size_t index, const J
     if (!a || !parent || (parent->type != JSON_OBJECT && parent->type != JSON_ARRAY)) return;
     if (index > parent->as.list.count) index = parent->as.list.count;
     size_t old_count = parent->as.list.count;
-    JsonNode* new_items = static_cast<JsonNode*>(arena_alloc(a, (old_count + 1) * sizeof(JsonNode)));
+    JsonNode* new_items = arena_alloc_array(a, JsonNode, old_count + 1);
     if (index > 0) memcpy(new_items, parent->as.list.items, index * sizeof(JsonNode));
     if (index < old_count) memcpy(new_items + index + 1, parent->as.list.items + index, (old_count - index) * sizeof(JsonNode));
     new_items[index] = node;
@@ -131,12 +136,14 @@ struct LargeTextFile {
 
     Arena main_arena;
     Arena scratch_arena;
+    Arena history_arena;
     JsonValue* root_json = nullptr;
     JsonError last_err = {};
 
     LargeTextFile() {
         arena_init(&main_arena);
         arena_init(&scratch_arena);
+        arena_init(&history_arena);
     }
 
     ~LargeTextFile() {
@@ -146,6 +153,7 @@ struct LargeTextFile {
         if (data) free(data);
         arena_free(&main_arena);
         arena_free(&scratch_arena);
+        arena_free(&history_arena);
     }
 
     LargeTextFile(const LargeTextFile&) = delete;
@@ -192,12 +200,14 @@ struct LargeTextFile {
     void ClearHistory() {
         undo_stack.clear();
         redo_stack.clear();
+        arena_reset(&history_arena);
     }
 
     void ClearAstHistory() {
         auto is_ast = [](const UndoRecord& r) { return r.action != UndoActionType::TextReplace; };
         undo_stack.erase(std::remove_if(undo_stack.begin(), undo_stack.end(), is_ast), undo_stack.end());
         redo_stack.erase(std::remove_if(redo_stack.begin(), redo_stack.end(), is_ast), redo_stack.end());
+        arena_reset(&history_arena);
     }
 
     void ClearGraph() {
@@ -225,7 +235,7 @@ struct LargeTextFile {
     }
 
     size_t GetHistoryMemoryUsage() const {
-        size_t total = 0;
+        size_t total = GetArenaMemoryUsage(&history_arena);
         for (const auto& r : undo_stack) {
             total += sizeof(UndoRecord) + r.path.capacity() * sizeof(size_t) + r.text_deltas.capacity() * sizeof(TextReplaceDelta);
             total += std::accumulate(r.text_deltas.begin(), r.text_deltas.end(), (size_t)0,
@@ -244,6 +254,22 @@ struct LargeTextFile {
         if (root_json) {
             CalculateJsonStats(root_json, ast_stats, 0);
         }
+    }
+
+    JsonNode CloneNodeForArena(Arena* target_arena, const JsonNode& node) {
+        JsonNode cloned = node;
+        if (node.key) {
+            cloned.key = static_cast<char*>(arena_alloc(target_arena, strlen(node.key) + 1));
+            strcpy(cloned.key, node.key);
+        }
+        if (node.pre_comment) {
+            cloned.pre_comment = static_cast<char*>(arena_alloc(target_arena, strlen(node.pre_comment) + 1));
+            strcpy(cloned.pre_comment, node.pre_comment);
+        }
+        JsonValue* cv = json_clone(target_arena, &node.value);
+        if (cv) cloned.value = *cv;
+        else memset(&cloned.value, 0, sizeof(JsonValue));
+        return cloned;
     }
 
     void Load(const char* filepath, bool allow_comments, bool parse_ast = true) {
@@ -370,7 +396,11 @@ struct LargeTextFile {
     }
 
     void PushUndo(UndoActionType action, const std::vector<size_t>& path, const JsonNode& node = JsonNode{}) {
-        undo_stack.push_back({ action, path, node, {} });
+        JsonNode saved = node;
+        if (action != UndoActionType::TextReplace) {
+            saved = CloneNodeForArena(&history_arena, node);
+        }
+        undo_stack.push_back({ action, path, saved, {} });
         redo_stack.clear();
         if (undo_stack.size() > 50000) undo_stack.erase(undo_stack.begin());
     }
@@ -413,8 +443,12 @@ struct LargeTextFile {
         if (rec.path.empty()) {
             if (rec.action == UndoActionType::SetNode) {
                 JsonNode current_root_node = JsonNode{}; current_root_node.value = *root_json;
-                opposite_stack.push_back({ UndoActionType::SetNode, rec.path, current_root_node, {} });
-                *root_json = rec.saved_node.value; tree_dirty = true; graph_dirty = true;
+                opposite_stack.push_back({ UndoActionType::SetNode, rec.path, CloneNodeForArena(&history_arena, current_root_node), {} });
+                
+                JsonValue* restored_val = json_clone(&main_arena, &rec.saved_node.value);
+                if (restored_val) *root_json = *restored_val;
+                else memset(root_json, 0, sizeof(JsonValue));
+                tree_dirty = true; graph_dirty = true;
             }
             return false;
         }
@@ -423,15 +457,15 @@ struct LargeTextFile {
         size_t target_idx = rec.path.back();
         if (rec.action == UndoActionType::SetNode) {
             if (target_idx < parent->as.list.count) {
-                opposite_stack.push_back({ UndoActionType::SetNode, rec.path, parent->as.list.items[target_idx], {} });
-                parent->as.list.items[target_idx] = rec.saved_node; tree_dirty = true; graph_dirty = true;
+                opposite_stack.push_back({ UndoActionType::SetNode, rec.path, CloneNodeForArena(&history_arena, parent->as.list.items[target_idx]), {} });
+                parent->as.list.items[target_idx] = CloneNodeForArena(&main_arena, rec.saved_node); tree_dirty = true; graph_dirty = true;
             }
         } else if (rec.action == UndoActionType::InsertNode) {
             opposite_stack.push_back({ UndoActionType::RemoveNode, rec.path, JsonNode{}, {} });
-            JsonInsertAtIndex(&main_arena, parent, target_idx, rec.saved_node); tree_dirty = true; graph_dirty = true;
+            JsonInsertAtIndex(&main_arena, parent, target_idx, CloneNodeForArena(&main_arena, rec.saved_node)); tree_dirty = true; graph_dirty = true;
         } else if (rec.action == UndoActionType::RemoveNode) {
             if (target_idx < parent->as.list.count) {
-                opposite_stack.push_back({ UndoActionType::InsertNode, rec.path, parent->as.list.items[target_idx], {} });
+                opposite_stack.push_back({ UndoActionType::InsertNode, rec.path, CloneNodeForArena(&history_arena, parent->as.list.items[target_idx]), {} });
                 JsonRemoveAtIndex(parent, target_idx); tree_dirty = true; graph_dirty = true;
             }
         }
@@ -440,8 +474,7 @@ struct LargeTextFile {
 
     void RebuildTreeFromText(bool allow_comments) {
         Uint64 t_freq = SDL_GetPerformanceFrequency(); Uint64 t0 = SDL_GetPerformanceCounter();
-        arena_free(&main_arena); arena_free(&scratch_arena);
-        arena_init(&main_arena); arena_init(&scratch_arena);
+        arena_reset(&main_arena); arena_reset(&scratch_arena);
         int parse_flags = allow_comments ? JSON_PARSE_ALLOW_COMMENTS : JSON_PARSE_STRICT;
         root_json = json_parse(&main_arena, &scratch_arena, data, size, parse_flags, &last_err);
         ClearGraph(); tree_dirty = false; graph_dirty = true;

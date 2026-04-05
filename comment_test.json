@@ -16,8 +16,7 @@
     // Pre-Element Comment
     null, // Trailing Element Comment
     /* Pre-Second Element Comment */
-    false
-    // Post-Elements Array Comment
+    false // Post-Elements Array Comment
   ] // Trailing Array Comment
   // Post-Elements Root Object Comment
 } // Trailing Root Comment
