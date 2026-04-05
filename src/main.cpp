@@ -20,7 +20,7 @@
 #include "views.h"
 #include "document.h"
 
-constexpr const char* APP_TITLE = "JsonLens v0.1.1-alpha";
+constexpr const char* APP_TITLE = "JsonLens v0.1.2-alpha";
 
 struct PathToken {
     enum Type { Key, Index, Wildcard } type;
