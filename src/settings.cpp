@@ -37,8 +37,8 @@ void AppSettings::Load() {
     JsonError err;
     JsonValue* root = json_parse(&arena, &scratch, data, bytes_read, JSON_PARSE_ALLOW_COMMENTS, &err);
     if (root && root->type == JSON_OBJECT) {
-        zoom = (float)json_get_number(root, "zoom", 1.0);
-        JsonValue* recents = json_get(root, "recent_files");
+        zoom = (float)json_object_get_number(root, "zoom", 1.0);
+        JsonValue* recents = json_object_get(root, "recent_files");
         
         JsonNode* entry;
         json_array_foreach(entry, recents) {
@@ -46,19 +46,19 @@ void AppSettings::Load() {
                 recent_files.push_back(entry->value.as.string);
             }
         }
-        const char* folder = json_get_string(root, "last_folder", nullptr);
+        const char* folder = json_object_get_string(root, "last_folder", nullptr);
         if (folder) last_folder = folder;
-        show_text_view = json_get_bool(root, "show_text_view", true);
-        show_tree_view = json_get_bool(root, "show_tree_view", false);
-        show_graph_view = json_get_bool(root, "show_graph_view", false);
-        graph_goto_target = (int)json_get_number(root, "graph_goto_target", 0.0);
-        allow_comments = json_get_bool(root, "allow_comments", true);
-        use_tabs = json_get_bool(root, "use_tabs", false);
-        indent_size = (int)json_get_number(root, "indent_size", 2.0);
-        default_view = (int)json_get_number(root, "default_view", 0.0);
-        window_width = (int)json_get_number(root, "window_width", 1280.0);
-        window_height = (int)json_get_number(root, "window_height", 720.0);
-        window_maximized = json_get_bool(root, "window_maximized", false);
+        show_text_view = json_object_get_bool(root, "show_text_view", true);
+        show_tree_view = json_object_get_bool(root, "show_tree_view", false);
+        show_graph_view = json_object_get_bool(root, "show_graph_view", false);
+        graph_goto_target = (int)json_object_get_number(root, "graph_goto_target", 0.0);
+        allow_comments = json_object_get_bool(root, "allow_comments", true);
+        use_tabs = json_object_get_bool(root, "use_tabs", false);
+        indent_size = (int)json_object_get_number(root, "indent_size", 2.0);
+        default_view = (int)json_object_get_number(root, "default_view", 0.0);
+        window_width = (int)json_object_get_number(root, "window_width", 1280.0);
+        window_height = (int)json_object_get_number(root, "window_height", 720.0);
+        window_maximized = json_object_get_bool(root, "window_maximized", false);
     }
     arena_free(&arena);
     arena_free(&scratch);
@@ -70,28 +70,28 @@ void AppSettings::Save() const {
     Arena arena;
     arena_init(&arena);
     JsonValue* root = json_create_object(&arena);
-    json_add_number(&arena, root, "zoom", zoom);
+    json_object_add_number(&arena, root, "zoom", zoom);
     
     JsonValue* recents = json_create_array(&arena);
     for (const auto& file : recent_files) {
-        json_append_string(&arena, recents, file.c_str());
+        json_array_append_string(&arena, recents, file.c_str());
     }
-    json_add(&arena, root, "recent_files", recents);
+    json_object_add(&arena, root, "recent_files", recents);
     
-    if (!last_folder.empty()) json_add_string(&arena, root, "last_folder", last_folder.c_str());
-    json_add_bool(&arena, root, "show_text_view", show_text_view);
-    json_add_bool(&arena, root, "show_tree_view", show_tree_view);
-    json_add_bool(&arena, root, "show_graph_view", show_graph_view);
-    json_add_number(&arena, root, "graph_goto_target", (double)graph_goto_target);
-    json_add_bool(&arena, root, "allow_comments", allow_comments);
-    json_add_bool(&arena, root, "use_tabs", use_tabs);
-    json_add_number(&arena, root, "indent_size", (double)indent_size);
-    json_add_number(&arena, root, "default_view", (double)default_view);
-    json_add_number(&arena, root, "window_width", (double)window_width);
-    json_add_number(&arena, root, "window_height", (double)window_height);
-    json_add_bool(&arena, root, "window_maximized", window_maximized);
+    if (!last_folder.empty()) json_object_add_string(&arena, root, "last_folder", last_folder.c_str());
+    json_object_add_bool(&arena, root, "show_text_view", show_text_view);
+    json_object_add_bool(&arena, root, "show_tree_view", show_tree_view);
+    json_object_add_bool(&arena, root, "show_graph_view", show_graph_view);
+    json_object_add_number(&arena, root, "graph_goto_target", (double)graph_goto_target);
+    json_object_add_bool(&arena, root, "allow_comments", allow_comments);
+    json_object_add_bool(&arena, root, "use_tabs", use_tabs);
+    json_object_add_number(&arena, root, "indent_size", (double)indent_size);
+    json_object_add_number(&arena, root, "default_view", (double)default_view);
+    json_object_add_number(&arena, root, "window_width", (double)window_width);
+    json_object_add_number(&arena, root, "window_height", (double)window_height);
+    json_object_add_bool(&arena, root, "window_maximized", window_maximized);
 
-    const char* str = json_to_string(&arena, root, true, false, 4, false);
+    const char* str = json_serialize(&arena, root, true, false, 4, false);
     if (str) {
         FILE* f = fopen(path.c_str(), "wb");
         if (f) { fwrite(str, 1, strlen(str), f); fclose(f); }

@@ -363,7 +363,7 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
         }
         if (ImGui::MenuItem("Copy Value")) {
             ArenaTemp temp = arena_temp_begin(&doc->scratch_arena);
-            const char* str = json_to_string(&doc->scratch_arena, val, true, false, 4, false);
+            const char* str = json_serialize(&doc->scratch_arena, val, true, false, 4, false);
             if (str) ImGui::SetClipboardText(str);
             arena_temp_end(temp);
         }
@@ -432,9 +432,9 @@ int DrawEditableJsonNode(LargeTextFile* doc, JsonNode* node, int node_index, std
             if (is_obj) {
                 char new_key[32];
                 snprintf(new_key, sizeof(new_key), "new_key_%zu", val->as.list.count);
-                json_add(&doc->main_arena, val, new_key, json_create_null(&doc->main_arena));
+                json_object_add(&doc->main_arena, val, new_key, json_create_null(&doc->main_arena));
             } else {
-                json_append(&doc->main_arena, val, json_create_null(&doc->main_arena));
+                json_array_append(&doc->main_arena, val, json_create_null(&doc->main_arena));
             }
             action |= 1;
         }

@@ -62,7 +62,7 @@ extern "C" {
 
 void arena_init(Arena *a);
 void *arena_alloc_fallback(Arena *a, size_t size);
-void *arena_alloc_zero(Arena *a, size_t size);
+void *arena_zalloc(Arena *a, size_t size);
 void arena_reset(Arena *a);
 void arena_free(Arena *a);
 
@@ -149,18 +149,18 @@ struct JsonNode {
 #define JSON_PARSE_ALLOW_COMMENTS 1
 
 JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len, int flags, JsonError *err);
-JsonValue *json_get(JsonValue *obj, const char *key);
-char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments);
+JsonValue *json_object_get(JsonValue *obj, const char *key);
+char *json_serialize(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments);
 
 /* --- New QoL & Mutation API --- */
-double      json_get_number(JsonValue *obj, const char *key, double fallback);
-const char* json_get_string(JsonValue *obj, const char *key, const char *fallback);
-bool        json_get_bool(JsonValue *obj, const char *key, bool fallback);
-JsonValue * json_get_case(JsonValue *obj, const char *key);
+double      json_object_get_number(JsonValue *obj, const char *key, double fallback);
+const char* json_object_get_string(JsonValue *obj, const char *key, const char *fallback);
+bool        json_object_get_bool(JsonValue *obj, const char *key, bool fallback);
+JsonValue * json_object_get_case_insensitive(JsonValue *obj, const char *key);
 
-void        json_remove_from_object(JsonValue *obj, const char *key);
-void        json_replace_in_object(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
-JsonValue * json_detach_from_object(Arena *a, JsonValue *obj, const char *key);
+void        json_object_remove(JsonValue *obj, const char *key);
+void        json_object_replace(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
+JsonValue * json_object_detach(Arena *a, JsonValue *obj, const char *key);
 JsonValue * json_clone(Arena *a, const JsonValue *val);
 
 #define json_object_foreach(entry, obj) \
@@ -176,14 +176,14 @@ JsonValue *json_create_string(Arena *a, const char *str);
 JsonValue *json_create_array(Arena *a);
 JsonValue *json_create_object(Arena *a);
 
-void json_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
-void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val);
-void json_add_number(Arena *a, JsonValue *obj, const char *key, double val);
-void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val);
+void json_object_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val);
+void json_object_add_string(Arena *a, JsonValue *obj, const char *key, const char *val);
+void json_object_add_number(Arena *a, JsonValue *obj, const char *key, double val);
+void json_object_add_bool(Arena *a, JsonValue *obj, const char *key, bool val);
 
-void json_append(Arena *a, JsonValue *arr, const JsonValue *val);
-void json_append_string(Arena *a, JsonValue *arr, const char *val);
-void json_append_number(Arena *a, JsonValue *arr, double val);
+void json_array_append(Arena *a, JsonValue *arr, const JsonValue *val);
+void json_array_append_string(Arena *a, JsonValue *arr, const char *val);
+void json_array_append_number(Arena *a, JsonValue *arr, double val);
 
 #ifdef __cplusplus
 }
@@ -283,7 +283,7 @@ void *arena_alloc_fallback(Arena *a, size_t size) {
     return (void *)a->end->data;
 }
 
-void *arena_alloc_zero(Arena *a, size_t size) {
+void *arena_zalloc(Arena *a, size_t size) {
     void *ptr = arena_alloc(a, size);
     if (ptr) memset(ptr, 0, size);
     return ptr;
@@ -1299,7 +1299,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
     if (len > 4096) {
         uint32_t cap = 256;
         while (cap < len / 4 && cap < KEY_CACHE_CAPACITY) cap *= 2;
-        s.key_cache = (KeyCacheEntry*)arena_alloc_zero(scratch, sizeof(KeyCacheEntry) * cap);
+        s.key_cache = (KeyCacheEntry*)arena_zalloc(scratch, sizeof(KeyCacheEntry) * cap);
         s.key_cache_mask = cap - 1;
     } else {
         s.key_cache = NULL;
@@ -1330,7 +1330,7 @@ JsonValue *json_parse(Arena *main, Arena *scratch, const char *input, size_t len
 
 /* --- Helpers and Builders --- */
 
-JsonValue *json_get(JsonValue *obj, const char *key) {
+JsonValue *json_object_get(JsonValue *obj, const char *key) {
     if (!obj || !key || obj->type != JSON_OBJECT) return NULL;
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (strcmp(obj->as.list.items[i].key, key) == 0) return &obj->as.list.items[i].value;
@@ -1340,18 +1340,18 @@ JsonValue *json_get(JsonValue *obj, const char *key) {
 
 /* --- New QoL Implementations --- */
 
-double json_get_number(JsonValue *obj, const char *key, double fallback) {
-    JsonValue *v = json_get(obj, key);
+double json_object_get_number(JsonValue *obj, const char *key, double fallback) {
+    JsonValue *v = json_object_get(obj, key);
     return (v && v->type == JSON_NUMBER) ? v->as.number : fallback;
 }
 
-const char* json_get_string(JsonValue *obj, const char *key, const char *fallback) {
-    JsonValue *v = json_get(obj, key);
+const char* json_object_get_string(JsonValue *obj, const char *key, const char *fallback) {
+    JsonValue *v = json_object_get(obj, key);
     return (v && v->type == JSON_STRING) ? v->as.string : fallback;
 }
 
-bool json_get_bool(JsonValue *obj, const char *key, bool fallback) {
-    JsonValue *v = json_get(obj, key);
+bool json_object_get_bool(JsonValue *obj, const char *key, bool fallback) {
+    JsonValue *v = json_object_get(obj, key);
     return (v && v->type == JSON_BOOL) ? v->as.boolean : fallback;
 }
 
@@ -1365,7 +1365,7 @@ static bool arena_json_strcasecmp(const char *a, const char *b) {
     return *a == *b;
 }
 
-JsonValue *json_get_case(JsonValue *obj, const char *key) {
+JsonValue *json_object_get_case_insensitive(JsonValue *obj, const char *key) {
     if (!obj || !key || obj->type != JSON_OBJECT) return NULL;
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (arena_json_strcasecmp(obj->as.list.items[i].key, key)) return &obj->as.list.items[i].value;
@@ -1373,7 +1373,7 @@ JsonValue *json_get_case(JsonValue *obj, const char *key) {
     return NULL;
 }
 
-void json_remove_from_object(JsonValue *obj, const char *key) {
+void json_object_remove(JsonValue *obj, const char *key) {
     if (!obj || !key || obj->type != JSON_OBJECT) return;
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (strcmp(obj->as.list.items[i].key, key) == 0) {
@@ -1387,7 +1387,7 @@ void json_remove_from_object(JsonValue *obj, const char *key) {
     }
 }
 
-void json_replace_in_object(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
+void json_object_replace(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
     if (!obj || !key || !val || obj->type != JSON_OBJECT) return;
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (strcmp(obj->as.list.items[i].key, key) == 0) {
@@ -1395,10 +1395,10 @@ void json_replace_in_object(Arena *a, JsonValue *obj, const char *key, const Jso
             return;
         }
     }
-    json_add(a, obj, key, val);
+    json_object_add(a, obj, key, val);
 }
 
-JsonValue *json_detach_from_object(Arena *a, JsonValue *obj, const char *key) {
+JsonValue *json_object_detach(Arena *a, JsonValue *obj, const char *key) {
     if (!obj || !key || obj->type != JSON_OBJECT) return NULL;
     for (size_t i = 0; i < obj->as.list.count; i++) {
         if (strcmp(obj->as.list.items[i].key, key) == 0) {
@@ -1748,7 +1748,7 @@ static void json_write_internal(JsonValue *v, StrBuilder *sb, int depth, bool pr
     }
 }
 
-char *json_to_string(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments) {
+char *json_serialize(Arena *a, JsonValue *v, bool pretty, bool use_tabs, int indent_step, bool keep_comments) {
     if (!a || !v) return NULL;
     StrBuilder sb;
     sb_init(&sb);
@@ -1810,10 +1810,10 @@ static void json_list_append(Arena *a, JsonValue *parent, const char *key, const
     parent->as.list.count = old_count + 1;
 }
 
-void json_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
+void json_object_add(Arena *a, JsonValue *obj, const char *key, const JsonValue *val) {
     if (obj && key && val && obj->type == JSON_OBJECT) json_list_append(a, obj, key, val);
 }
-void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val) {
+void json_object_add_string(Arena *a, JsonValue *obj, const char *key, const char *val) {
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
         str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
@@ -1824,23 +1824,23 @@ void json_add_string(Arena *a, JsonValue *obj, const char *key, const char *val)
         json_list_append(a, obj, key, &str_val);
     }
 }
-void json_add_number(Arena *a, JsonValue *obj, const char *key, double val) {
+void json_object_add_number(Arena *a, JsonValue *obj, const char *key, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
     num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
     num_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &num_val);
 }
-void json_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
+void json_object_add_bool(Arena *a, JsonValue *obj, const char *key, bool val) {
     JsonValue bool_val; bool_val.type = JSON_BOOL; bool_val.as.boolean = val;
     bool_val.pre_comment = NULL; bool_val.post_comment = NULL; bool_val.offset = 0;
     bool_val.trailing_comment = NULL;
     json_list_append(a, obj, key, &bool_val);
 }
 
-void json_append(Arena *a, JsonValue *arr, const JsonValue *val) {
+void json_array_append(Arena *a, JsonValue *arr, const JsonValue *val) {
     if (arr && val && arr->type == JSON_ARRAY) json_list_append(a, arr, NULL, val);
 }
-void json_append_string(Arena *a, JsonValue *arr, const char *val) {
+void json_array_append_string(Arena *a, JsonValue *arr, const char *val) {
     if (val) {
         JsonValue str_val; str_val.type = JSON_STRING;
         str_val.pre_comment = NULL; str_val.post_comment = NULL; str_val.offset = 0;
@@ -1852,7 +1852,7 @@ void json_append_string(Arena *a, JsonValue *arr, const char *val) {
     }
 }
 
-void json_append_number(Arena *a, JsonValue *arr, double val) {
+void json_array_append_number(Arena *a, JsonValue *arr, double val) {
     JsonValue num_val; num_val.type = JSON_NUMBER; num_val.as.number = val;
     num_val.pre_comment = NULL; num_val.post_comment = NULL; num_val.offset = 0;
     num_val.trailing_comment = NULL;

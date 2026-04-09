@@ -359,7 +359,7 @@ struct LargeTextFile {
         Uint64 t0 = SDL_GetPerformanceCounter();
         arena_free(&scratch_arena);
         arena_init(&scratch_arena);
-        const char* new_text = json_to_string(&scratch_arena, root_json, is_pretty, use_tabs, indent_step, keep_comments);
+        const char* new_text = json_serialize(&scratch_arena, root_json, is_pretty, use_tabs, indent_step, keep_comments);
         if (new_text) {
             size_t new_len = strlen(new_text);
             if (new_len >= data_capacity) {
