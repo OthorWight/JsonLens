@@ -233,58 +233,6 @@ int main(int /*argc*/, char** /*argv*/) {
     auto JumpToMatch = [&](size_t offset) {
         if (active_view == ActiveView::Text) {
             JumpToLine(doc->GetLineFromOffset(offset));
-        } else {
-            std::vector<JsonValue*> current_path;
-            std::vector<JsonValue*> best_path;
-            std::function<void(JsonValue*)> find_closest = [&](JsonValue* val) {
-                if (!val) return;
-                current_path.push_back(val);
-                best_path = current_path;
-
-                if (val->type == JSON_OBJECT || val->type == JSON_ARRAY) {
-                    JsonValue* best_child = nullptr;
-                    for (size_t i = 0; i < val->as.list.count; ++i) {
-                        JsonValue* child = &val->as.list.items[i].value;
-                        if (i + 1 < val->as.list.count) {
-                            size_t next_offset = val->as.list.items[i+1].value.offset;
-                            size_t boundary = next_offset;
-                            while (boundary > child->offset && doc->data[boundary] != ',') {
-                                boundary--;
-                            }
-                            if (boundary <= child->offset) {
-                                boundary = child->offset + (next_offset - child->offset) / 2;
-                            }
-                            if (offset < boundary) {
-                                best_child = child;
-                                break;
-                            }
-                        } else {
-                            best_child = child;
-                            break;
-                        }
-                    }
-                    if (best_child) find_closest(best_child);
-                }
-                current_path.pop_back();
-            };
-            
-            if (doc->root_json) find_closest(doc->root_json);
-
-            if (!best_path.empty()) {
-                tree_focus_path = best_path;
-                tree_highlight_val = best_path.back();
-                tree_highlight_time = ImGui::GetTime();
-                tree_focus_frames = 3;
-                
-                if (active_view == ActiveView::Tree) {
-                    settings.show_tree_view = true;
-                    force_tree_tab = true;
-                } else if (active_view == ActiveView::Graph) {
-                    settings.show_graph_view = true;
-                    force_graph_tab = true;
-                    doc->graph_dirty = true;
-                }
-            } else JumpToLine(doc->GetLineFromOffset(offset));
         }
     };
 
@@ -617,12 +565,13 @@ int main(int /*argc*/, char** /*argv*/) {
                     ImGui::SetClipboardText(doc->data);
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Find", "Ctrl+F", false, has_doc)) {
+            bool can_search = has_doc && active_view == ActiveView::Text;
+            if (ImGui::MenuItem("Find", "Ctrl+F", false, can_search)) {
                     if (!show_search_bar) search_dirty = true;
                     show_search_bar = true;
                     focus_search = true;
                 }
-                if (ImGui::MenuItem("Replace", "Ctrl+H", false, has_doc)) {
+            if (ImGui::MenuItem("Replace", "Ctrl+H", false, can_search)) {
                     if (!show_search_bar) search_dirty = true;
                     show_search_bar = true;
                     focus_replace = true;
@@ -772,7 +721,7 @@ int main(int /*argc*/, char** /*argv*/) {
             FormatFile(false);
         }
         
-        bool can_global_search = !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data;
+        bool can_global_search = !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && doc->data && active_view == ActiveView::Text;
         if (can_global_search && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F)) {
             if (!show_search_bar) search_dirty = true;
             show_search_bar = true;
@@ -835,7 +784,7 @@ int main(int /*argc*/, char** /*argv*/) {
             }
         }
 
-        if (show_search_bar && doc->data && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building) {
+        if (show_search_bar && doc->data && !doc_loading && !doc_saving && !doc_formatting && !doc_graph_building && active_view == ActiveView::Text) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
             ImGui::BeginChild("SearchAndReplace", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 2 + 8.0f), ImGuiChildFlags_Border);
@@ -914,7 +863,7 @@ int main(int /*argc*/, char** /*argv*/) {
             ImGui::PopStyleColor();
         }
 
-        if (search_dirty && !doc_formatting && doc->data) {
+        if (search_dirty && !doc_formatting && doc->data && active_view == ActiveView::Text) {
             search_results.clear();
             if (search_buf[0] != '\0') {
                 size_t search_len = strlen(search_buf);
