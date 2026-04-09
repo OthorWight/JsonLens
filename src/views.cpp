@@ -55,27 +55,30 @@ GraphNode* BuildGraphNode(LargeTextFile* doc, JsonValue* val, const std::string&
 }
 
 void LayoutGraphNode(GraphNode* node, int depth, float& current_y, float& max_x, float current_x) {
+    float node_height = ImMax(24.0f, ImGui::GetFontSize() + 8.0f);
+    float step_y = node_height + 10.0f;
+
     node->x = current_x;
     
-    // Approximate width (ImGui context isn't thread-safe, allowing background processing)
-    node->drawn_width = (node->label.length() * 8.0f) + 16.0f;
+    // Accurate width using ImGui (Layout now safely runs on the main thread)
+    node->drawn_width = ImGui::CalcTextSize(node->label.c_str()).x + 16.0f;
 
     if (node->x + node->drawn_width > max_x) max_x = node->x + node->drawn_width;
 
     if (node->children.empty()) {
         node->y = current_y;
-        node->subtree_min_y = current_y - 20.0f;
-        node->subtree_max_y = current_y + 20.0f;
-        current_y += 34.0f;
+        node->subtree_min_y = current_y - (step_y * 0.6f);
+        node->subtree_max_y = current_y + (step_y * 0.6f);
+        current_y += step_y;
     } else {
         float start_y = current_y;
         float next_x = current_x + node->drawn_width + 80.0f; // Ensure exactly 80px space for the connecting bezier lines
         for (auto child : node->children) {
             LayoutGraphNode(child, depth + 1, current_y, max_x, next_x);
         }
-        node->y = (start_y + (current_y - 34.0f)) / 2.0f;
-        node->subtree_min_y = start_y - 20.0f;
-        node->subtree_max_y = current_y + 20.0f;
+        node->y = (start_y + (current_y - step_y)) / 2.0f;
+        node->subtree_min_y = start_y - (step_y * 0.6f);
+        node->subtree_max_y = current_y + (step_y * 0.6f);
     }
 }
 
@@ -127,11 +130,13 @@ void DrawGraphEdges(ImDrawList* dl, GraphNode* node, ImVec2 offset, const ImRect
 }
 
 void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse_pos, GraphNode** out_hovered, const ImRect& clip_rect, JsonValue* highlight_val, double highlight_time, int focus_frames) {
+    float node_height = ImMax(24.0f, ImGui::GetFontSize() + 8.0f);
+
     if (offset.x + node->x > clip_rect.Max.x) return;
     if (offset.y + node->subtree_max_y < clip_rect.Min.y || offset.y + node->subtree_min_y > clip_rect.Max.y) return;
 
-    ImVec2 p_min = ImVec2(offset.x + node->x, offset.y + node->y - 12.0f);
-    ImVec2 p_max = ImVec2(p_min.x + node->drawn_width, p_min.y + 24.0f);
+    ImVec2 p_min = ImVec2(offset.x + node->x, offset.y + node->y - (node_height * 0.5f));
+    ImVec2 p_max = ImVec2(p_min.x + node->drawn_width, p_min.y + node_height);
 
     if (node->source_val == highlight_val && node->type == GraphNodeType::Normal) {
         float fade = ImMax(0.0f, 1.0f - (float)(ImGui::GetTime() - highlight_time) / 1.5f);
@@ -158,7 +163,7 @@ void DrawGraphNodes(ImDrawList* dl, GraphNode* node, ImVec2 offset, ImVec2 mouse
         dl->AddRectFilled(p_min, p_max, bg_col, 4.0f);
         dl->AddRect(p_min, p_max, border_col, 4.0f);
         
-        float text_y = p_min.y + (24.0f - ImGui::GetFontSize()) * 0.5f;
+        float text_y = p_min.y + (node_height - ImGui::GetFontSize()) * 0.5f;
         dl->AddText(ImVec2(p_min.x + 8.0f, text_y), text_col, node->label.c_str());
     }
 

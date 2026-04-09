@@ -1831,22 +1831,23 @@ int main(int /*argc*/, char** /*argv*/) {
                 } else if (doc->root_json) {
                     if (doc->graph_dirty) {
                         doc->graph_dirty = false;
-                    doc_graph_building = true;
-                    if (doc_thread.joinable()) doc_thread.join();
-                    doc_thread = std::thread([doc, &doc_graph_building]() {
+                        doc_graph_building = true;
+                        if (doc_thread.joinable()) doc_thread.join();
                         doc->ClearGraph();
-                        int node_count = 0;
-                        doc->graph_root = BuildGraphNode(doc, doc->root_json, "Root", 0, node_count);
-                        if (doc->graph_root) {
-                            float current_y = 40.0f;
-                            float max_x = 0.0f;
-                            LayoutGraphNode(doc->graph_root, 0, current_y, max_x);
-                            doc->graph_total_width = max_x + 100.0f;
-                            doc->graph_total_height = current_y + 40.0f;
-                        }
-                        doc->graph_memory_bytes = doc->CalculateGraphMemory(doc->graph_root);
-                        doc_graph_building = false;
-                    });
+                        doc_thread = std::thread([doc, &doc_graph_building]() {
+                            int node_count = 0;
+                            doc->graph_root = BuildGraphNode(doc, doc->root_json, "Root", 0, node_count);
+                            doc->graph_memory_bytes = doc->CalculateGraphMemory(doc->graph_root);
+                            doc_graph_building = false;
+                        });
+                    }
+
+                    if (!doc_graph_building && doc->graph_root && doc->graph_total_width == 0.0f) {
+                        float current_y = 40.0f;
+                        float max_x = 0.0f;
+                        LayoutGraphNode(doc->graph_root, 0, current_y, max_x);
+                        doc->graph_total_width = max_x + 100.0f;
+                        doc->graph_total_height = current_y + 40.0f;
                     }
 
                     ImVec2 offset = ImGui::GetCursorScreenPos();
